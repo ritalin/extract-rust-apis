@@ -27,6 +27,22 @@ impl TypeDecl {
             crate_symbol: None,
         }
     }
+
+    pub fn as_slice(self) -> Self {
+        TypeDecl {
+            symbol: format!("[{}]", self.symbol),
+            qual_symbol: format!("[{}]", self.qual_symbol),
+            crate_symbol: self.crate_symbol,
+        }
+    }
+
+    pub fn as_ptr(self) -> Self {
+        TypeDecl {
+            symbol: format!("*{}", self.symbol),
+            qual_symbol: format!("*{}", self.qual_symbol),
+            crate_symbol: self.crate_symbol,
+        }
+    }
 }
 
 impl Serialize for TypeDecl {

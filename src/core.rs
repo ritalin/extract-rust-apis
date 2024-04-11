@@ -81,7 +81,7 @@ impl ProcessHandler {
     pub fn handle_extract(&self, ctx: &ProcessContext) -> Vec<FnDecl> {
         info!("Begining extract");
 
-        ctx.walk_item(|def_id, item| {
+        ctx.walk_item(|_def_id, item| {
             match item.kind {
                 ItemKind::Impl(impl_def) if impl_def.items.len() > 0 => {
                     debug!("impl_def: {:?}", impl_def);
@@ -98,16 +98,29 @@ impl ProcessHandler {
                         .collect::<Vec<_>>()
                     );
                 }
-                ItemKind::Use(_, _) if ctx.is_hidden_item(def_id) => {
-                    trace!("unsupported item: {:?}", item.kind)
-                }
+
+                ItemKind::Mod(_) |
+                ItemKind::ForeignMod { .. } |
+                ItemKind::Use(_, _) |
+                ItemKind::Const(_, _, _) |
                 ItemKind::Macro(_, _) |
                 ItemKind::Static(_, _, _) |
                 ItemKind::Struct(_, _) |
+                ItemKind::Enum(_, _) |
+                ItemKind::Union(_, _) |
+                ItemKind::GlobalAsm(_) |
+                ItemKind::Impl(_) |
                 ItemKind::ExternCrate(_) => {
                     trace!("unsupported item: {:?}", item.kind)
                 }
-                _ => warn!("skipped: {:?}", item.kind),
+
+                ItemKind::Fn(_, _, _) |
+                ItemKind::TraitAlias(_, _) |
+                ItemKind::Trait(_, _, _, _, _) |
+                ItemKind::TyAlias(_, _) |
+                ItemKind::OpaqueTy(_) => {
+                    warn!("todo: {:?}", item.kind);
+                }
             }
             None    
         })
@@ -117,47 +130,9 @@ impl ProcessHandler {
 fn walk_impl_item(ctx: &ProcessContext, impl_item: &ImplItem, owner: &Option<TypeDecl>) -> Option<FnDecl>  {
     match impl_item.kind {
         ImplItemKind::Fn(FnSig{ decl, .. }, _) => {
-            trace!("Function Decl: {:?}", decl);
+            trace!("Impl Function Decl: {:?}", decl);
             
-            let ret_decl = match walk_return_type_item(ctx, &decl.output) {
-                Ok(ty) => ty,
-                Err(err) => {
-                    warn!("(fn.return) {}", err);
-                    Some(TypeDecl::unknown())
-                }
-            };
-            let args = decl.inputs.iter().enumerate()
-                .filter_map(|(i, p)| {
-                    debug!("(fn.arg[{}]): {:?}", i, p);
-
-                    match walk_type_item(ctx, &p) {
-                        Ok(ty) => Some(ty),
-                        Err(err) => {
-                            warn!("unprocessed (fn.arg[{}]) {}", i, err);
-                            Some(TypeDecl::unknown())
-                        }
-                    }
-                })
-                .collect::<Vec<TypeDecl>>()
-            ;
-            let qual_symbol = format_fn_qual_symbol(&impl_item.ident.name.to_ident_string(), &args, &ret_decl);
-
-            let fn_decl = FnDecl {
-                proto: TypeDecl {
-                    symbol: impl_item.ident.name.as_str().to_string(),
-                    qual_symbol: match owner {
-                        Some(owner) => format!("{}::{}", owner.qual_symbol, qual_symbol),
-                        None => qual_symbol,
-                    },
-                    crate_symbol: owner.as_ref().and_then(|x| x.crate_symbol.as_ref().map(|owner| owner.clone())),
-                },
-                owner: owner.as_ref().map(|owner| owner.clone()),
-                ret_decl,
-                args,
-            };
-            info!("{}", fn_decl.proto.qual_symbol);
-
-            return Some(fn_decl)
+            return walk_function_item(ctx, decl, impl_item.ident.name.as_str(), owner);
         }
         ImplItemKind::Const(_, _) => {
             trace!("skipped Impl Const");
@@ -168,6 +143,48 @@ fn walk_impl_item(ctx: &ProcessContext, impl_item: &ImplItem, owner: &Option<Typ
     }
 
     None
+}
+
+fn walk_function_item(ctx: &ProcessContext, decl: &rustc_hir::FnDecl, proto_symbol: &str, owner: &Option<TypeDecl>) -> Option<FnDecl> {
+    let ret_decl = match walk_return_type_item(ctx, &decl.output) {
+        Ok(ty) => ty,
+        Err(err) => {
+            warn!("(fn.return) {}", err);
+            Some(TypeDecl::unknown())
+        }
+    };
+    let args = decl.inputs.iter().enumerate()
+        .filter_map(|(i, p)| {
+            debug!("(fn.arg[{}]): {:?}", i, p);
+
+            match walk_type_item(ctx, &p) {
+                Ok(ty) => Some(ty),
+                Err(err) => {
+                    warn!("unprocessed (fn.arg[{}]) {}", i, err);
+                    Some(TypeDecl::unknown())
+                }
+            }
+        })
+        .collect::<Vec<TypeDecl>>()
+    ;
+    let qual_symbol = format_fn_qual_symbol(proto_symbol, &args, &ret_decl);
+
+    let fn_decl = FnDecl {
+        proto: TypeDecl {
+            symbol: proto_symbol.to_string(),
+            qual_symbol: match owner {
+                Some(owner) => format!("{}::{}", owner.qual_symbol, qual_symbol),
+                None => qual_symbol,
+            },
+            crate_symbol: owner.as_ref().and_then(|x| x.crate_symbol.as_ref().map(|owner| owner.clone())),
+        },
+        owner: owner.as_ref().map(|owner| owner.clone()),
+        ret_decl,
+        args,
+    };
+    info!("{}", fn_decl.proto.qual_symbol);
+
+    Some(fn_decl)
 }
 
 fn walk_return_type_item(ctx: &ProcessContext, type_item: &FnRetTy) -> Result<Option<TypeDecl>, String> {
@@ -211,16 +228,38 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
         TyKind::Tup(tup_items) => {
             walk_tuple_items(ctx, &tup_items)
         }
+        TyKind::Array(ty, _) |
+        TyKind::Slice(ty) => {
+            walk_type_item(ctx, &ty).map(TypeDecl::as_slice)
+        }
+        TyKind::Ptr(rustc_hir::MutTy {ty, mutbl: _ }) => {
+            walk_type_item(ctx, &ty).map(TypeDecl::as_ptr)
+        }
+        TyKind::BareFn(rustc_hir::BareFnTy { decl: fn_decl, .. }) => {
+            match walk_function_item(ctx, fn_decl, "", &None) {
+                Some(fn_decl) => {
+                    Ok(TypeDecl {
+                        symbol: format_fn_symbol("", &fn_decl.args, &fn_decl.ret_decl),
+                        qual_symbol: format_fn_qual_symbol("", &fn_decl.args, &fn_decl.ret_decl),
+                        crate_symbol: None,
+                    })
+                }
+                None => Err("BareFn".to_string())
+            }
+        }
+        TyKind::TraitObject(_, _, _) => {
+            warn!("TraitObject is complecated... so retired!");
+            Ok(TypeDecl {
+                symbol: "TraitObject".to_string(),
+                qual_symbol: "TraitObject".to_string(),
+                crate_symbol: None,
+            })
+        }
 
         TyKind::InferDelegation(_, _) => Err("InferDelegation".to_string()),
-        TyKind::Slice(_) => Err("Slice".to_string()),
-        TyKind::Array(_, _) => Err("Array".to_string()),
-        TyKind::Ptr(_) => Err("Ptr".to_string()),
-        TyKind::BareFn(_) => Err("BareFn".to_string()),
         TyKind::Never => Err("Never".to_string()),
         TyKind::AnonAdt(_) => Err("AnonAdt".to_string()),
         TyKind::OpaqueDef(_, _, _) => Err("OpaqueDef".to_string()),
-        TyKind::TraitObject(_, _, _) => Err("TraitObject".to_string()),
         TyKind::Typeof(_) => Err("Typeof".to_string()),
         TyKind::Infer => Err("Infer".to_string()),
         TyKind::Err(_) => Err("Err".to_string()),
@@ -278,6 +317,13 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
         }
         _ => (format!("***{:?}***", res), None)
     }
+}
+
+fn format_fn_symbol(prototype_name: &str, args: &[TypeDecl], ret_decl: &Option<TypeDecl>) -> String {
+    let formatted_args = args.iter().map(|arg| arg.symbol.to_string()).collect::<Vec<_>>();
+    let formatted_ret = ret_decl.as_ref().map(|ret| format!("-> {}", &ret.symbol)).unwrap_or("".to_string());
+
+    format!("{}({}) {}", prototype_name, formatted_args.join(", "), formatted_ret)
 }
 
 fn format_fn_qual_symbol(prototype_name: &str, args: &[TypeDecl], ret_decl: &Option<TypeDecl>) -> String {
