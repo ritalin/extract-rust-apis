@@ -79,8 +79,6 @@ pub struct ProcessHandler;
 
 impl ProcessHandler {
     pub fn handle_extract(&self, ctx: &ProcessContext) -> Vec<FnDecl> {
-        info!("Begining extract");
-
         ctx.walk_item(|_def_id, item| {
             match item.kind {
                 ItemKind::Impl(impl_def) if impl_def.items.len() > 0 => {
@@ -178,7 +176,6 @@ fn walk_function_item(ctx: &ProcessContext, decl: &rustc_hir::FnDecl, proto_symb
             },
             crate_symbol: owner.as_ref().and_then(|x| x.crate_symbol.as_ref().map(|owner| owner.clone())),
         },
-        owner: owner.as_ref().map(|owner| owner.clone()),
         ret_decl,
         args,
     };

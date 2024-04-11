@@ -58,26 +58,13 @@ impl Serialize for TypeDecl {
     }
 }
 
-#[derive(Debug, Serialize)]
-pub enum TypeRelKind {
-    Return, 
-    Arg,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TypeRelEdge {
-    kind: TypeRelKind,
-    parent: TypeDecl,
-    child: TypeDecl,
-}
-
 #[derive(Debug)]
 pub struct FnDecl {
     proto: TypeDecl,
-    owner: Option<TypeDecl>,
     ret_decl: Option<TypeDecl>,
     args: Vec<TypeDecl>,
 }
 
 pub mod compile;
 pub mod core;
+pub mod print;

@@ -1,18 +1,42 @@
 
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use rustc_interface::interface;
 use rustc_session::config;
 use rustc_hash::{FxHashMap};
+use rustc_span::source_map::SourceMap;
+use rustc_errors::{DiagCtxt, DiagInner, FluentBundle};
 
-use tracing::{info};
+use tracing::{info, error};
 
-type FnDecl = super::FnDecl;
 type ProcessContext<'ctx> = super::core::ProcessContext<'ctx>;
 type ProcessHandler = super::core::ProcessHandler;
+type PrintHandler = super::print::PrintHandler;
 
-pub fn run(root_crate: &str, handler: ProcessHandler) {
+struct SilentEmitter;
+
+impl rustc_errors::emitter::Emitter for SilentEmitter {
+    fn emit_diagnostic(&mut self, diag: DiagInner) {
+        error!("emitted error captured (level: {})", diag.level());
+    }
+
+    fn source_map(&self) -> Option<&Arc<SourceMap>> {
+        None
+    }
+}
+impl rustc_errors::translation::Translate for SilentEmitter {
+    fn fluent_bundle(&self) -> Option<&Arc<FluentBundle>> {
+        None
+    }
+
+    fn fallback_fluent_bundle(&self) -> &FluentBundle {
+        panic!("this emitter should not translate message")
+    }
+}
+
+pub fn run(root_crate: &str, handler: ProcessHandler, fmt: PrintHandler) {
     let rustc_out = std::process::Command::new("rustc")
         .arg("--print=sysroot")
         .current_dir(".")
@@ -51,6 +75,9 @@ pub fn run(root_crate: &str, handler: ProcessHandler) {
         },
         input: config::Input::File(file_path),
         registry: errors,
+        psess_created: Some(Box::new(|psess| {
+            psess.dcx = DiagCtxt::new(Box::new(SilentEmitter));
+        })),
         locale_resources: rustc_driver::DEFAULT_LOCALE_RESOURCES, 
         lint_caps: FxHashMap::default(),
         crate_cfg: vec![],
@@ -64,7 +91,6 @@ pub fn run(root_crate: &str, handler: ProcessHandler) {
         hash_untracked_state: None,
         ice_file: None, 
         make_codegen_backend: None,
-        psess_created: None,
         using_internal_features,
     };
 
@@ -72,7 +98,18 @@ pub fn run(root_crate: &str, handler: ProcessHandler) {
         compiler.enter(|queries| {
             let Ok(mut gcx) = queries.global_ctxt() else { rustc_errors::FatalError.raise() };
             gcx.enter(|ctx| {
-                let _ = handler.handle_extract(&ProcessContext::new(ctx, root_crate));
+                let fns = {
+                    info!("Begining extract");
+                    let fns = handler.handle_extract(&ProcessContext::new(ctx, root_crate));
+                    info!("Extract finished");
+                    fns
+                };
+                
+                {
+                    info!("Begining dump");
+                    fmt.handle_print(fns);
+                    info!("Dump finished");
+                }
             })
         })
     })
