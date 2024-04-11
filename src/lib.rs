@@ -16,7 +16,17 @@ use serde::{Serialize, ser::SerializeStruct};
 pub struct TypeDecl {
     symbol: String,
     qual_symbol: String,
-    crate_symbol: String,
+    crate_symbol: Option<String>,
+}
+
+impl TypeDecl {
+    pub fn unknown() -> Self {
+        TypeDecl {
+            symbol: "????".to_string(),
+            qual_symbol: "????".to_string(),
+            crate_symbol: None,
+        }
+    }
 }
 
 impl Serialize for TypeDecl {

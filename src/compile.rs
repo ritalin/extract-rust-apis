@@ -6,15 +6,6 @@ use rustc_interface::interface;
 use rustc_session::config;
 use rustc_hash::{FxHashMap};
 
-// use rustc_hir::ItemKind;
-// use rustc_hir::ImplItemKind;
-// use rustc_hir::ImplItemRef;
-// use rustc_hir::FnSig;
-// use rustc_hir::FnRetTy;
-// use rustc_hir::TyKind;
-// use rustc_hir::QPath;
-// use rustc_span::def_id::DefId;
-
 use tracing::{info};
 
 type FnDecl = super::FnDecl;
@@ -29,8 +20,6 @@ pub fn run(root_crate: &str, handler: ProcessHandler) {
         .unwrap()
     ;
     let sysroot = String::from_utf8(rustc_out.stdout).unwrap().trim().to_string();
-
-    // let root_crate_name = "std";
     
     let file_path: PathBuf = [
         &sysroot, 
@@ -54,7 +43,6 @@ pub fn run(root_crate: &str, handler: ProcessHandler) {
     );
 
     let errors = rustc_driver::diagnostics_registry();
-    // let errors = rustc_errors::registry::Registry::new(vec![]);
 
     let rustc_config = interface::Config {
         opts: config::Options {
