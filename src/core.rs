@@ -85,7 +85,7 @@ impl ProcessHandler {
                     debug!("impl_def: {:?}", impl_def);
 
                     let owner = 
-                        walk_type_item(ctx, &impl_def.self_ty)
+                        walk_impl_owner(ctx, &impl_def)
                         .map_err(|err| warn!(err))
                         .ok()
                     ;
@@ -122,6 +122,23 @@ impl ProcessHandler {
             }
             None    
         })
+    }
+}
+
+fn walk_impl_owner(ctx: &ProcessContext, impl_def: &rustc_hir::Impl) -> WalkResult<TypeDecl> {
+    match impl_def.of_trait {
+        Some(rustc_hir::TraitRef { path, .. }) => {
+            let (qual_symbol, crate_symbol) = resolve_qualified_type(ctx, &path.res, path.segments);
+
+            Ok(TypeDecl {
+                symbol: pick_type_symbol(path.segments),
+                qual_symbol,
+                crate_symbol,
+            })
+        }
+        None => {
+            walk_type_item(ctx, &impl_def.self_ty)
+        }
     }
 }
 
@@ -184,7 +201,7 @@ fn walk_function_item(ctx: &ProcessContext, decl: &rustc_hir::FnDecl, proto_symb
     Some(fn_decl)
 }
 
-fn walk_return_type_item(ctx: &ProcessContext, type_item: &FnRetTy) -> Result<Option<TypeDecl>, String> {
+fn walk_return_type_item(ctx: &ProcessContext, type_item: &FnRetTy) -> WalkResult<Option<TypeDecl>> {
     debug!("ret_decl: {:?}", type_item);
     match type_item {
         FnRetTy::Return(ty) => walk_type_item(ctx, &ty).map(Option::Some),
@@ -206,7 +223,7 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
             trace!("qual_symbol: {}, crate_symbol: {:?}", qual_symbol, crate_symbol);
 
             Ok(TypeDecl {
-                symbol: segments.last().map(|seg| seg.ident.name.to_ident_string()).unwrap_or("????".to_string()),
+                symbol: pick_type_symbol(segments),
                 qual_symbol,
                 crate_symbol,
             })
@@ -285,6 +302,12 @@ fn walk_tuple_items(ctx: &ProcessContext, tup_items: &[rustc_hir::Ty]) -> WalkRe
         qual_symbol: format!("({})", symbols.1.join(", ")),
         crate_symbol: None,
     })
+}
+
+fn pick_type_symbol(segments: &[rustc_hir::PathSegment]) -> String {
+    segments.last()
+        .map(|seg| seg.ident.name.to_ident_string())
+        .unwrap_or("????".to_string())
 }
 
 fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segments: &[rustc_hir::PathSegment]) -> (String, Option<String>) {
