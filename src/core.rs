@@ -5,6 +5,7 @@ use rustc_span::def_id::DefId;
 use rustc_hir::def_id::CrateNum;
 use rustc_hir::definitions::DefPath;
 
+use rustc_hir::Node;
 use rustc_hir::Item;
 use rustc_hir::ItemKind;
 use rustc_hir::Ty;
@@ -57,6 +58,10 @@ impl ProcessContext<'_> {
 
     pub fn is_hidden_item(&self, def_id: DefId) -> bool {
         !self.raw_context.visibility(def_id).is_public()
+    }
+
+    pub fn node_of(&self, def_id: DefId) -> Node {
+        self.raw_context.hir_node_by_def_id(def_id.expect_local())
     }
 
     pub fn crate_name_of(&self, krate: CrateNum) -> String {
@@ -312,11 +317,10 @@ fn pick_type_symbol(segments: &[rustc_hir::PathSegment]) -> String {
 
 fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segments: &[rustc_hir::PathSegment]) -> (String, Option<String>) {
     match res {
-        rustc_hir::def::Res::Def(_, def_id) |
-        rustc_hir::def::Res::SelfTyAlias {alias_to: def_id, .. } => {
+        rustc_hir::def::Res::Def(_, def_id) => {
             let defpath = ctx.def_path(def_id);
             let crate_name = ctx.crate_name_of(defpath.krate);
-            trace!("defpath: {:?}", defpath);
+            debug!("defpath: {:?}", defpath);
 
             let defpath_name = 
                 defpath.data.iter().filter_map(|x| match x.data {
@@ -328,6 +332,19 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
             ;
 
             (format!("{crate_name}::{defpath_name}"), Some(crate_name))
+        }
+        rustc_hir::def::Res::SelfTyAlias {alias_to: def_id, .. } => {
+            match ctx.node_of(*def_id) {
+                Node::Item(rustc_hir::Item { kind: ItemKind::Impl( rustc_hir::Impl { self_ty, .. }), .. }) => {
+                    info!("(SelfTyAlias) retry `walk_type_item` for resolving type");
+                    if let Ok(type_decl) = walk_type_item(ctx, self_ty) {
+                        return (type_decl.qual_symbol, type_decl.crate_symbol)
+                    };
+                }
+                _ => {}
+            }
+
+            (pick_type_symbol(segments), None)
         }
         rustc_hir::def::Res::PrimTy(ty) => {
             (ty.name_str().to_string(), None)
