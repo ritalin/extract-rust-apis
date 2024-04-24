@@ -4,6 +4,7 @@ use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::DefId;
 use rustc_hir::def_id::CrateNum;
 use rustc_hir::definitions::DefPath;
+use rustc_hir::definitions::DefPathData;
 
 use rustc_hir::Node;
 use rustc_hir::Item;
@@ -147,8 +148,25 @@ fn walk_impl_item(ctx: &ProcessContext, impl_item: &ImplItem, owner: &Option<Typ
     match impl_item.kind {
         ImplItemKind::Fn(FnSig{ decl, .. }, _) => {
             trace!("Impl Function Decl: {:?}", decl);
-            
-            return walk_function_item(ctx, decl, impl_item.ident.name.as_str(), owner);
+            trace!("Fn generics: {:?}", impl_item.generics);
+
+            let param_names = 
+                impl_item.generics.params.into_iter().filter_map(|p| match p.name {
+                    rustc_hir::ParamName::Plain(param_name) => Some(param_name.as_str().to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+            ;
+
+            let prototype_name = match param_names.len() == 0 {  
+                true => impl_item.ident.name.as_str().to_string(),
+                false => format!("{}<{}>", 
+                    impl_item.ident.name.as_str().to_string(),
+                    param_names.join(",")
+                )
+            };
+
+            return walk_function_item(ctx, decl, &prototype_name, owner);
         }
         ImplItemKind::Const(_, _) => {
             trace!("skipped Impl Const");
@@ -346,7 +364,8 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
 
             let defpath_name = 
                 defpath.data.iter().filter_map(|x| match x.data {
-                    rustc_hir::definitions::DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
+                    DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
+                    DefPathData::ValueNs(ns) => Some(ns.as_str().to_string()),
                     _ => None,
                 })
                 .collect::<Vec<String>>()
@@ -354,7 +373,8 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
             ;
             let symbol = defpath.data.iter().last()
                 .and_then(|x| match x.data {
-                    rustc_hir::definitions::DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
+                    DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
+                    DefPathData::ValueNs(ns) => Some(ns.as_str().to_string()),
                     _ => None
                 })
                 .unwrap_or_else(|| symbol_from_segments(segments))
