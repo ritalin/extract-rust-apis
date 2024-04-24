@@ -11,20 +11,41 @@ extern crate rustc_middle;
 
 use serde::{Serialize, ser::SerializeStruct};
 
+#[derive(Debug, Clone)]
+pub struct SymbolDecl {
+    symbol: String,
+    qual_symbol: String,
+}
+
+impl Serialize for SymbolDecl {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut decl = serializer.serialize_struct("type_decl", 4)?;
+        {
+            decl.serialize_field("symbol", &self.symbol)?;
+            decl.serialize_field("qual_symbol", &self.qual_symbol)?;
+        }
+        decl.end()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
     symbol: String,
     qual_symbol: String,
     crate_symbol: Option<String>,
+    type_category: TypeCategory,
 }
 
 impl TypeDecl {
     pub fn unknown() -> Self {
         TypeDecl {
-            symbol: "????".to_string(),
-            qual_symbol: "????".to_string(),
+            symbol: "????***(unknown)***".to_string(),
+            qual_symbol: "????***(unknown)***".to_string(),
             crate_symbol: None,
+            type_category: TypeCategory::Nominal,
         }
     }
 
@@ -33,6 +54,7 @@ impl TypeDecl {
             symbol: format!("[{}]", self.symbol),
             qual_symbol: format!("[{}]", self.qual_symbol),
             crate_symbol: self.crate_symbol,
+            type_category: TypeCategory::Slice(SymbolDecl { symbol: self.symbol.to_string(), qual_symbol: self.qual_symbol.to_string() }),
         }
     }
 
@@ -41,6 +63,7 @@ impl TypeDecl {
             symbol: format!("*{}", self.symbol),
             qual_symbol: format!("*{}", self.qual_symbol),
             crate_symbol: self.crate_symbol,
+            type_category: self.type_category,
         }
     }
 }
@@ -50,12 +73,41 @@ impl Serialize for TypeDecl {
     where
         S: serde::Serializer,
     {
-        let mut decl = serializer.serialize_struct("type_decl", 3)?;
-        decl.serialize_field("symbol", &self.symbol)?;
-        decl.serialize_field("qual_symbol", &self.qual_symbol)?;
-        decl.serialize_field("crate_symbol", &self.crate_symbol)?;
+        let mut decl = serializer.serialize_struct("type_decl", 4)?;
+        {
+            decl.serialize_field("symbol", &self.symbol)?;
+            decl.serialize_field("qual_symbol", &self.qual_symbol)?;
+            decl.serialize_field("crate_symbol", &self.crate_symbol)?;
+
+            match &self.type_category {
+                TypeCategory::Nominal | 
+                TypeCategory::Function | 
+                TypeCategory::Trait => {
+                    // dismiss
+                }
+                TypeCategory::Alias(s) => {
+                    decl.serialize_field("alias", &s)?;
+                }
+                TypeCategory::Slice(member) => {
+                    decl.serialize_field("slice_member", &vec![member])?;
+                }
+                TypeCategory::Tuple { members } => {
+                    decl.serialize_field("tuple_members", &members)?;
+                }
+            };
+        }
         decl.end()
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum TypeCategory {
+    Nominal,
+    Trait,
+    Function,
+    Alias (String), 
+    Slice(SymbolDecl),
+    Tuple { members: Vec<SymbolDecl> },
 }
 
 #[derive(Debug)]
@@ -63,6 +115,21 @@ pub struct FnDecl {
     proto: TypeDecl,
     ret_decl: Option<TypeDecl>,
     args: Vec<TypeDecl>,
+}
+
+impl Serialize for FnDecl {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut decl = serializer.serialize_struct("fn_decl", 4)?;
+        {
+            decl.serialize_field("proto", &self.proto)?;
+            decl.serialize_field("ret_decl", &self.ret_decl)?;
+            decl.serialize_field("args", &self.args)?;
+        }
+        decl.end()
+    }
 }
 
 pub mod compile;

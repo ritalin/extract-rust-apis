@@ -13,6 +13,6 @@ fn main() {
     fndump::compile::run(
         "std", 
         fndump::core::ProcessHandler{}, 
-        fndump::print::PrintHandler::new("exp", true)
+        fndump::print::PrintHandler::new("std", "exp", true)
     );
 }

@@ -24,6 +24,8 @@ use tracing::{info, debug, warn, trace};
 
 type FnDecl = super::FnDecl;
 type TypeDecl = super::TypeDecl;
+type SymbolDecl = super::SymbolDecl;
+type TypeCategory = super::TypeCategory;
 
 type WalkResult<T> = std::result::Result<T, String>;
 
@@ -133,13 +135,7 @@ impl ProcessHandler {
 fn walk_impl_owner(ctx: &ProcessContext, impl_def: &rustc_hir::Impl) -> WalkResult<TypeDecl> {
     match impl_def.of_trait {
         Some(rustc_hir::TraitRef { path, .. }) => {
-            let (qual_symbol, crate_symbol) = resolve_qualified_type(ctx, &path.res, path.segments);
-
-            Ok(TypeDecl {
-                symbol: pick_type_symbol(path.segments),
-                qual_symbol,
-                crate_symbol,
-            })
+            Ok(resolve_qualified_type(ctx, &path.res, path.segments))
         }
         None => {
             walk_type_item(ctx, &impl_def.self_ty)
@@ -197,6 +193,7 @@ fn walk_function_item(ctx: &ProcessContext, decl: &rustc_hir::FnDecl, proto_symb
                 None => qual_symbol,
             },
             crate_symbol: owner.as_ref().and_then(|x| x.crate_symbol.as_ref().map(|owner| owner.clone())),
+            type_category: crate::TypeCategory::Nominal,
         },
         ret_decl,
         args,
@@ -224,14 +221,14 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
             walk_type_item(ctx, mut_ty)
         }
         TyKind::Path(QPath::Resolved(None, rustc_hir::Path {res, segments, ..})) => {
-            let (qual_symbol, crate_symbol) = resolve_qualified_type(ctx, res, segments);
-            trace!("qual_symbol: {}, crate_symbol: {:?}", qual_symbol, crate_symbol);
+            let resolved_type = resolve_qualified_type(ctx, res, segments);
+            trace!("qual_symbol: {}, crate_symbol: {:?}", resolved_type.qual_symbol, resolved_type.crate_symbol);
 
-            Ok(TypeDecl {
-                symbol: pick_type_symbol(segments),
-                qual_symbol,
-                crate_symbol,
-            })
+            Ok(resolved_type)
+        }
+        TyKind::Path(QPath::TypeRelative(ty, _)) => {
+            info!("(TypeRelative) retry `walk_type_item` with internal type item");
+            walk_type_item(ctx, ty)
         }
         TyKind::Ref(_, mut_ty) => {
             info!("(Ref) retry `walk_type_item` with internal type item");
@@ -242,6 +239,7 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
                 symbol: "()".to_string(),
                 qual_symbol: "()".to_string(),
                 crate_symbol: None,
+                type_category: TypeCategory::Tuple { members: vec![] },
             })
         }
         TyKind::Tup(tup_items) => {
@@ -261,6 +259,7 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
                         symbol: format_fn_symbol("", &fn_decl.args, &fn_decl.ret_decl),
                         qual_symbol: format_fn_qual_symbol("", &fn_decl.args, &fn_decl.ret_decl),
                         crate_symbol: None,
+                        type_category: TypeCategory::Function,
                     })
                 }
                 None => Err("BareFn".to_string())
@@ -272,11 +271,19 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
                 symbol: "TraitObject".to_string(),
                 qual_symbol: "TraitObject".to_string(),
                 crate_symbol: None,
+                type_category: TypeCategory::Trait,
+            })
+        }
+        TyKind::Never => {
+            Ok(TypeDecl {
+                symbol: "!".to_string(),
+                qual_symbol: "!".to_string(),
+                crate_symbol: None,
+                type_category: TypeCategory::Nominal,
             })
         }
 
         TyKind::InferDelegation(_, _) => Err("InferDelegation".to_string()),
-        TyKind::Never => Err("Never".to_string()),
         TyKind::AnonAdt(_) => Err("AnonAdt".to_string()),
         TyKind::OpaqueDef(_, _, _) => Err("OpaqueDef".to_string()),
         TyKind::Typeof(_) => Err("Typeof".to_string()),
@@ -287,7 +294,7 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
 }
 
 fn walk_tuple_items(ctx: &ProcessContext, tup_items: &[rustc_hir::Ty]) -> WalkResult<TypeDecl> {
-    let symbols: (Vec<_>, Vec<_>) = tup_items.iter().enumerate()
+    let symbols_vecs: (Vec<_>, Vec<_>) = tup_items.iter().enumerate()
         .map(|(i, item)| {
             match walk_type_item(ctx, &item) {
                 Ok(ty) => (ty.symbol, ty.qual_symbol),
@@ -300,22 +307,37 @@ fn walk_tuple_items(ctx: &ProcessContext, tup_items: &[rustc_hir::Ty]) -> WalkRe
         .unzip()
     ;
 
-    trace!("Tuple items: {:?}",symbols);
+    trace!("Tuple items: {:?}",symbols_vecs);
+    
+    let symbol = symbols_vecs.0.join(", ");
+    let qual_symbol = symbols_vecs.1.join(", ");
+    let members = symbols_vecs.0.into_iter().zip(symbols_vecs.1)
+        .map(|(s, qs)| SymbolDecl { symbol: s.to_string(), qual_symbol: qs.to_string() })
+        .collect::<Vec<_>>()
+    ;
 
     Ok(TypeDecl {
-        symbol: format!("({})", symbols.0.join(", ")),
-        qual_symbol: format!("({})", symbols.1.join(", ")),
+        symbol: format!("({})", symbol),
+        qual_symbol: format!("({})", qual_symbol),
         crate_symbol: None,
+        type_category: TypeCategory::Tuple { members }
     })
 }
 
-fn pick_type_symbol(segments: &[rustc_hir::PathSegment]) -> String {
+fn symbol_from_segments(segments: &[rustc_hir::PathSegment]) -> String {
     segments.last()
         .map(|seg| seg.ident.name.to_ident_string())
-        .unwrap_or("????".to_string())
+        .unwrap_or("".to_string())
 }
 
-fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segments: &[rustc_hir::PathSegment]) -> (String, Option<String>) {
+fn qual_symbol_from_segments(segments: &[rustc_hir::PathSegment]) -> String {
+    segments.iter()
+        .map(|seg| seg.ident.name.as_str().to_string())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segments: &[rustc_hir::PathSegment]) -> TypeDecl {
     match res {
         rustc_hir::def::Res::Def(_, def_id) => {
             let defpath = ctx.def_path(def_id);
@@ -330,29 +352,64 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
                 .collect::<Vec<String>>()
                 .join("::")
             ;
+            let symbol = defpath.data.iter().last()
+                .and_then(|x| match x.data {
+                    rustc_hir::definitions::DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
+                    _ => None
+                })
+                .unwrap_or_else(|| symbol_from_segments(segments))
+            ;
 
-            (format!("{crate_name}::{defpath_name}"), Some(crate_name))
+            TypeDecl {
+                symbol,
+                qual_symbol: format!("{crate_name}::{defpath_name}"), 
+                crate_symbol: Some(crate_name),
+                type_category: TypeCategory::Nominal,
+            }
         }
         rustc_hir::def::Res::SelfTyAlias {alias_to: def_id, .. } => {
             match ctx.node_of(*def_id) {
                 Node::Item(rustc_hir::Item { kind: ItemKind::Impl( rustc_hir::Impl { self_ty, .. }), .. }) => {
                     info!("(SelfTyAlias) retry `walk_type_item` for resolving type");
                     if let Ok(type_decl) = walk_type_item(ctx, self_ty) {
-                        return (type_decl.qual_symbol, type_decl.crate_symbol)
+                        return TypeDecl{ type_category: TypeCategory::Alias("Self".to_string()), ..type_decl };
                     };
                 }
                 _ => {}
             }
-
-            (pick_type_symbol(segments), None)
+            
+            TypeDecl {
+                symbol: symbol_from_segments(segments),
+                qual_symbol: qual_symbol_from_segments(segments), 
+                crate_symbol: None,
+                type_category: TypeCategory::Nominal,
+            }
         }
         rustc_hir::def::Res::PrimTy(ty) => {
-            (ty.name_str().to_string(), None)
+            TypeDecl {
+                symbol: ty.name_str().to_string(),
+                qual_symbol: ty.name_str().to_string(),
+                crate_symbol: None,
+                type_category: TypeCategory::Nominal,
+            }
         }
         rustc_hir::def::Res::Err if segments.len() > 0 => {
-            (segments[0].ident.as_str().to_string(), None)
+            TypeDecl {
+                symbol: symbol_from_segments(segments),
+                qual_symbol: qual_symbol_from_segments(segments),
+                crate_symbol: None,
+                type_category: TypeCategory::Nominal,
+            }
         }
-        _ => (format!("***{:?}***", res), None)
+        _ => {
+            let symbol = format!("***{:?}***", res);
+            TypeDecl {
+                symbol: symbol.to_string(),
+                qual_symbol: symbol.to_string(),
+                crate_symbol: None,
+                type_category: TypeCategory::Nominal,
+            }
+        }
     }
 }
 

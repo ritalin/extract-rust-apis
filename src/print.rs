@@ -20,43 +20,28 @@ pub struct TypeRel {
 }
 
 pub struct PrintHandler {
+    crate_symbol: String,
     output_dir: String,
     prety_print: bool,
 }
 
 impl PrintHandler {
-    pub fn new(output_dir: &str, prety_print: bool) -> Self {
+    pub fn new(crate_symbol: &str, output_dir: &str, prety_print: bool) -> Self {
         PrintHandler {
+            crate_symbol: crate_symbol.to_string(),
             output_dir: output_dir.to_string(),
             prety_print,
         }
     }
 
     pub fn handle_print(&self, functions: Vec<FnDecl>) {
-        let prototypes = functions.iter().map(|f| Some(f.proto.clone()));
-        let returns = functions.iter().filter_map(|f| f.ret_decl.as_ref().map(|ret| TypeRel { kind: TypeRelKind::Return, parent: f.proto.clone(), child: ret.clone() }));
-        let parameters = functions.iter().flat_map(|f| f.args.iter().map(|p| TypeRel { kind: TypeRelKind::Arg, parent: f.proto.clone(), child: p.clone() }));
-        
-        let prototype_path: PathBuf = [self.output_dir.to_string(), "prototype.json".to_string()].iter().collect();
-        let type_path: PathBuf = [self.output_dir.to_string(), "type.json".to_string()].iter().collect();
-        
-        {
-            let ser = if self.prety_print { serde_json::to_string_pretty } else { serde_json::to_string };
+        let file_path: PathBuf = [self.output_dir.to_string(), format!("fn_decl_{}.json", self.crate_symbol)].iter().collect();
+        let ser = if self.prety_print { serde_json::to_string_pretty } else { serde_json::to_string };
 
-            match ser(&prototypes.collect::<Vec<_>>()) {
-                Ok(json) => export_to(&prototype_path, json),
-                Err(err) => error!("Can not export to prototype.json: {}", err),
-            };
-        }
-
-        {
-            let ser = if self.prety_print { serde_json::to_string_pretty } else { serde_json::to_string };
-
-            match ser(&returns.chain(parameters).collect::<Vec<_>>()) {
-                Ok(json) => export_to(&type_path, json),
-                Err(err) => error!("Can not export to type.json: {}", err),
-            }
-        }
+        match ser(&functions) {
+            Ok(json) => export_to(&file_path, json),
+            Err(err) => error!("Can not export to prototype.json: {}", err),
+        };
     }
 }
 
