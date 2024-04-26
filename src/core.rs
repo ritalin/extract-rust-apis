@@ -18,9 +18,7 @@ use rustc_hir::ImplItem;
 use rustc_hir::ImplItemKind;
 use rustc_hir::FnSig;
 use rustc_hir::FnRetTy;
-
-
-// use rustc_hir::ImplItemKind;
+use rustc_hir::Generics;
 
 use tracing::{info, debug, warn, trace};
 
@@ -109,6 +107,25 @@ impl ProcessHandler {
                         .collect::<Vec<_>>()
                     );
                 }
+                ItemKind::Fn(FnSig { decl, .. }, generics, _) => {
+                    let defpath = ctx.def_path(&item.owner_id.to_def_id());
+                    let owner_crate = ctx.crate_name_of(defpath.krate);
+
+                    let owner = TypeDecl {
+                        symbol: symbol_from_defpath(&defpath, &vec![]),
+                        qual_symbol: format!("{}::{}", owner_crate, qual_symbol_from_defpath(&defpath)),
+                        crate_symbol: Some(owner_crate),
+                        type_category: TypeCategory::Nominal,
+                        deprecation: None,
+                    };
+
+                    debug!("Global function of {}", owner.qual_symbol);
+
+                    let prototype_name = format_prototype_name(item.ident.as_str(), &generics);
+                    let fn_decl = walk_function_item(ctx, item.owner_id, decl, &prototype_name, &Some(owner));
+                    
+                    return fn_decl.map(|x| vec![x])
+                }
 
                 ItemKind::Mod(_) |
                 ItemKind::ForeignMod { .. } |
@@ -125,7 +142,6 @@ impl ProcessHandler {
                     trace!("unsupported item: {:?}", item.kind)
                 }
 
-                ItemKind::Fn(_, _, _) |
                 ItemKind::TraitAlias(_, _) |
                 ItemKind::Trait(_, _, _, _, _) |
                 ItemKind::TyAlias(_, _) |
@@ -155,21 +171,7 @@ fn walk_impl_item(ctx: &ProcessContext, impl_item: &ImplItem, owner: &Option<Typ
             trace!("Impl Function Decl: {:?}", decl);
             trace!("Fn generics: {:?}", impl_item.generics);
 
-            let generic_param_names = 
-                impl_item.generics.params.into_iter().filter_map(|p| match p.name {
-                    rustc_hir::ParamName::Plain(param_name) => Some(param_name.as_str().to_string()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-            ;
-
-            let prototype_name = match generic_param_names.len() == 0 {  
-                true => impl_item.ident.name.as_str().to_string(),
-                false => format!("{}<{}>", 
-                    impl_item.ident.name.as_str().to_string(),
-                    generic_param_names.join(",")
-                )
-            };
+            let prototype_name = format_prototype_name(impl_item.ident.name.as_str(), impl_item.generics);
 
             return walk_function_item(ctx, impl_item.owner_id, decl, &prototype_name, owner);
         }
@@ -378,6 +380,26 @@ fn qual_symbol_from_segments(segments: &[rustc_hir::PathSegment]) -> String {
         .join("::")
 }
 
+fn symbol_from_defpath(defpath: &DefPath, segments: &[rustc_hir::PathSegment]) -> String {
+    defpath.data.iter().last()
+    .and_then(|x| match x.data {
+        DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
+        DefPathData::ValueNs(ns) => Some(ns.as_str().to_string()),
+        _ => None
+    })
+    .unwrap_or_else(|| symbol_from_segments(segments))
+}
+
+fn qual_symbol_from_defpath(defpath: &DefPath) -> String {
+    defpath.data.iter().filter_map(|x| match x.data {
+        DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
+        DefPathData::ValueNs(ns) => Some(ns.as_str().to_string()),
+        _ => None,
+    })
+    .collect::<Vec<String>>()
+    .join("::")
+}
+
 fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segments: &[rustc_hir::PathSegment]) -> TypeDecl {
     match res {
         rustc_hir::def::Res::Def(_, def_id) => {
@@ -388,23 +410,8 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
             let crate_name = ctx.crate_name_of(defpath.krate);
             debug!("defpath: {:?}", defpath);
 
-            let defpath_name = 
-                defpath.data.iter().filter_map(|x| match x.data {
-                    DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
-                    DefPathData::ValueNs(ns) => Some(ns.as_str().to_string()),
-                    _ => None,
-                })
-                .collect::<Vec<String>>()
-                .join("::")
-            ;
-            let symbol = defpath.data.iter().last()
-                .and_then(|x| match x.data {
-                    DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
-                    DefPathData::ValueNs(ns) => Some(ns.as_str().to_string()),
-                    _ => None
-                })
-                .unwrap_or_else(|| symbol_from_segments(segments))
-            ;
+            let defpath_name = qual_symbol_from_defpath(&defpath);
+            let symbol = symbol_from_defpath(&defpath, segments);
 
             TypeDecl {
                 symbol,
@@ -461,6 +468,24 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
                 deprecation: None,
             }
         }
+    }
+}
+
+fn format_prototype_name(prototype_name: &str, generics: &Generics) -> String {
+    let generic_param_names = 
+        generics.params.into_iter().filter_map(|p| match p.name {
+            rustc_hir::ParamName::Plain(param_name) => Some(param_name.as_str().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+    ;
+
+    match generic_param_names.len() == 0 {  
+        true => prototype_name.to_string(),
+        false => format!("{}<{}>", 
+            prototype_name.to_string(),
+            generic_param_names.join(",")
+        )
     }
 }
 
