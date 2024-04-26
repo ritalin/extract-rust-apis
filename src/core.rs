@@ -5,6 +5,7 @@ use rustc_span::def_id::DefId;
 use rustc_hir::def_id::CrateNum;
 use rustc_hir::definitions::DefPath;
 use rustc_hir::definitions::DefPathData;
+use rustc_hir::hir_id::OwnerId;
 
 use rustc_hir::Node;
 use rustc_hir::Item;
@@ -81,6 +82,10 @@ impl ProcessContext<'_> {
     pub fn impl_item(&self, id: ImplItemId) -> &ImplItem {
         self.raw_context.hir().impl_item(id)
     }
+
+    pub fn lookup_deprecation(&self, def_id: DefId) -> Option<rustc_attr::Deprecation> {
+        self.raw_context.lookup_deprecation(def_id)
+    }
 }
 
 pub struct ProcessHandler;
@@ -150,7 +155,7 @@ fn walk_impl_item(ctx: &ProcessContext, impl_item: &ImplItem, owner: &Option<Typ
             trace!("Impl Function Decl: {:?}", decl);
             trace!("Fn generics: {:?}", impl_item.generics);
 
-            let param_names = 
+            let generic_param_names = 
                 impl_item.generics.params.into_iter().filter_map(|p| match p.name {
                     rustc_hir::ParamName::Plain(param_name) => Some(param_name.as_str().to_string()),
                     _ => None,
@@ -158,15 +163,15 @@ fn walk_impl_item(ctx: &ProcessContext, impl_item: &ImplItem, owner: &Option<Typ
                 .collect::<Vec<_>>()
             ;
 
-            let prototype_name = match param_names.len() == 0 {  
+            let prototype_name = match generic_param_names.len() == 0 {  
                 true => impl_item.ident.name.as_str().to_string(),
                 false => format!("{}<{}>", 
                     impl_item.ident.name.as_str().to_string(),
-                    param_names.join(",")
+                    generic_param_names.join(",")
                 )
             };
 
-            return walk_function_item(ctx, decl, &prototype_name, owner);
+            return walk_function_item(ctx, impl_item.owner_id, decl, &prototype_name, owner);
         }
         ImplItemKind::Const(_, _) => {
             trace!("skipped Impl Const");
@@ -179,7 +184,7 @@ fn walk_impl_item(ctx: &ProcessContext, impl_item: &ImplItem, owner: &Option<Typ
     None
 }
 
-fn walk_function_item(ctx: &ProcessContext, decl: &rustc_hir::FnDecl, proto_symbol: &str, owner: &Option<TypeDecl>) -> Option<FnDecl> {
+fn walk_function_item(ctx: &ProcessContext, owner_id: OwnerId, decl: &rustc_hir::FnDecl, proto_symbol: &str, owner: &Option<TypeDecl>) -> Option<FnDecl> {
     let ret_decl = match walk_return_type_item(ctx, &decl.output) {
         Ok(ty) => ty,
         Err(err) => {
@@ -203,6 +208,16 @@ fn walk_function_item(ctx: &ProcessContext, decl: &rustc_hir::FnDecl, proto_symb
     ;
     let qual_symbol = format_fn_qual_symbol(proto_symbol, &args, &ret_decl);
 
+    let deprecation = 
+        ctx.lookup_deprecation(owner_id.to_def_id())
+        .or(
+            owner.as_ref()
+            .and_then(|x| x.deprecation)
+        )
+    ;
+
+    debug!("(fn.deprecated) {:?}", deprecation);
+
     let fn_decl = FnDecl {
         proto: TypeDecl {
             symbol: proto_symbol.to_string(),
@@ -212,6 +227,7 @@ fn walk_function_item(ctx: &ProcessContext, decl: &rustc_hir::FnDecl, proto_symb
             },
             crate_symbol: owner.as_ref().and_then(|x| x.crate_symbol.as_ref().map(|owner| owner.clone())),
             type_category: crate::TypeCategory::Nominal,
+            deprecation,
         },
         ret_decl,
         args,
@@ -258,6 +274,7 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
                 qual_symbol: "()".to_string(),
                 crate_symbol: None,
                 type_category: TypeCategory::Tuple { members: vec![] },
+                deprecation: None,
             })
         }
         TyKind::Tup(tup_items) => {
@@ -271,13 +288,16 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
             walk_type_item(ctx, &ty).map(TypeDecl::as_ptr)
         }
         TyKind::BareFn(rustc_hir::BareFnTy { decl: fn_decl, .. }) => {
-            match walk_function_item(ctx, fn_decl, "", &None) {
+            debug!("[BareFn] walk into function");
+
+            match walk_function_item(ctx, type_item.hir_id.owner, fn_decl, "", &None) {
                 Some(fn_decl) => {
                     Ok(TypeDecl {
                         symbol: format_fn_symbol("", &fn_decl.args, &fn_decl.ret_decl),
                         qual_symbol: format_fn_qual_symbol("", &fn_decl.args, &fn_decl.ret_decl),
                         crate_symbol: None,
                         type_category: TypeCategory::Function,
+                        deprecation: fn_decl.proto.deprecation,
                     })
                 }
                 None => Err("BareFn".to_string())
@@ -290,6 +310,7 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
                 qual_symbol: "TraitObject".to_string(),
                 crate_symbol: None,
                 type_category: TypeCategory::Trait,
+                deprecation: None,
             })
         }
         TyKind::Never => {
@@ -298,6 +319,7 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
                 qual_symbol: "!".to_string(),
                 crate_symbol: None,
                 type_category: TypeCategory::Nominal,
+                deprecation: None,
             })
         }
 
@@ -338,7 +360,8 @@ fn walk_tuple_items(ctx: &ProcessContext, tup_items: &[rustc_hir::Ty]) -> WalkRe
         symbol: format!("({})", symbol),
         qual_symbol: format!("({})", qual_symbol),
         crate_symbol: None,
-        type_category: TypeCategory::Tuple { members }
+        type_category: TypeCategory::Tuple { members },
+        deprecation: None,
     })
 }
 
@@ -358,6 +381,9 @@ fn qual_symbol_from_segments(segments: &[rustc_hir::PathSegment]) -> String {
 fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segments: &[rustc_hir::PathSegment]) -> TypeDecl {
     match res {
         rustc_hir::def::Res::Def(_, def_id) => {
+            let deprecation = ctx.lookup_deprecation(*def_id);
+            debug!("(qual_type.deprecated) {:?}", deprecation);
+        
             let defpath = ctx.def_path(def_id);
             let crate_name = ctx.crate_name_of(defpath.krate);
             debug!("defpath: {:?}", defpath);
@@ -385,6 +411,7 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
                 qual_symbol: format!("{crate_name}::{defpath_name}"), 
                 crate_symbol: Some(crate_name),
                 type_category: TypeCategory::Nominal,
+                deprecation,
             }
         }
         rustc_hir::def::Res::SelfTyAlias {alias_to: def_id, .. } => {
@@ -403,6 +430,7 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
                 qual_symbol: qual_symbol_from_segments(segments), 
                 crate_symbol: None,
                 type_category: TypeCategory::Nominal,
+                deprecation: None,
             }
         }
         rustc_hir::def::Res::PrimTy(ty) => {
@@ -411,6 +439,7 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
                 qual_symbol: ty.name_str().to_string(),
                 crate_symbol: None,
                 type_category: TypeCategory::Nominal,
+                deprecation: None,
             }
         }
         rustc_hir::def::Res::Err if segments.len() > 0 => {
@@ -419,6 +448,7 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
                 qual_symbol: qual_symbol_from_segments(segments),
                 crate_symbol: None,
                 type_category: TypeCategory::Nominal,
+                deprecation: None,
             }
         }
         _ => {
@@ -428,6 +458,7 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
                 qual_symbol: symbol.to_string(),
                 crate_symbol: None,
                 type_category: TypeCategory::Nominal,
+                deprecation: None,
             }
         }
     }

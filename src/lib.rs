@@ -8,6 +8,9 @@ extern crate rustc_span;
 extern crate rustc_errors;
 extern crate rustc_driver; 
 extern crate rustc_middle; 
+extern crate rustc_attr; 
+
+use rustc_attr::DeprecatedSince;
 
 use serde::{Serialize, ser::SerializeStruct};
 
@@ -37,6 +40,7 @@ pub struct TypeDecl {
     qual_symbol: String,
     crate_symbol: Option<String>,
     type_category: TypeCategory,
+    deprecation: Option<rustc_attr::Deprecation>,
 }
 
 impl TypeDecl {
@@ -46,6 +50,7 @@ impl TypeDecl {
             qual_symbol: "????***(unknown)***".to_string(),
             crate_symbol: None,
             type_category: TypeCategory::Nominal,
+            deprecation: None,
         }
     }
 
@@ -55,6 +60,7 @@ impl TypeDecl {
             qual_symbol: format!("[{}]", self.qual_symbol),
             crate_symbol: self.crate_symbol,
             type_category: TypeCategory::Slice(SymbolDecl { symbol: self.symbol.to_string(), qual_symbol: self.qual_symbol.to_string() }),
+            deprecation: self.deprecation,
         }
     }
 
@@ -64,6 +70,7 @@ impl TypeDecl {
             qual_symbol: format!("*{}", self.qual_symbol),
             crate_symbol: self.crate_symbol,
             type_category: self.type_category,
+            deprecation: self.deprecation,
         }
     }
 }
@@ -95,6 +102,20 @@ impl Serialize for TypeDecl {
                     decl.serialize_field("tuple_members", &members)?;
                 }
             };
+
+            if let Some(deprecation) = self.deprecation {
+                match deprecation.since {
+                    DeprecatedSince::RustcVersion(version) => {
+                        decl.serialize_field("deprecated", &format!("{version}"))?;
+                    }
+                    DeprecatedSince::Future => {
+                        decl.serialize_field("deprecated", "future...")?;
+                    }
+                    _ => {
+                        decl.serialize_field("deprecated", "unknown...")?;
+                    }
+                }
+            }
         }
         decl.end()
     }

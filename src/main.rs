@@ -7,7 +7,7 @@ fn main() {
         .with_target(false)
     ;
     tracing_subscriber::registry()
-    .with(stdout_log.with_filter(filter::LevelFilter::DEBUG))
+    .with(stdout_log.with_filter(filter::LevelFilter::TRACE))
     .init();
 
     fndump::compile::run(
