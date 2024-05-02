@@ -3,17 +3,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
 use rustc_interface::interface;
 use rustc_session::config;
-use rustc_hash::{FxHashMap};
 use rustc_span::source_map::SourceMap;
 use rustc_errors::{DiagCtxt, DiagInner, FluentBundle};
 
 use tracing::{info, error};
 
-type ProcessContext<'ctx> = super::core::ProcessContext<'ctx>;
-type ProcessHandler = super::core::ProcessHandler;
-type PrintHandler = super::print::PrintHandler;
+use crate::{core::ProcessHandler, print::PrintHandler};
+use crate::support::ProcessContext;
 
 struct SilentEmitter;
 
@@ -97,10 +96,17 @@ pub fn run(root_crate: &str, handler: ProcessHandler, fmt: PrintHandler) {
     interface::run_compiler(rustc_config, |compiler| {
         compiler.enter(|queries| {
             let Ok(mut gcx) = queries.global_ctxt() else { rustc_errors::FatalError.raise() };
-            gcx.enter(|ctx| {
+            gcx.enter(|raw_ctx| {
+                let mut ctx = ProcessContext::new(raw_ctx, root_crate);
+                {
+                    info!("#### PHASE(1) Extract re-export items");
+                    ctx.set_import_loopup(crate::core::import_handler::handle_extract(&ctx));
+                    info!("Extract finished");
+                }
+
                 let fns = {
-                    info!("Begining extract");
-                    let fns = handler.handle_extract(&ProcessContext::new(ctx, root_crate));
+                    info!("#### PHASE(2) Extract functions");
+                    let fns = handler.handle_extract(&ctx);
                     info!("Extract finished");
                     fns
                 };

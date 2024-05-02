@@ -1,110 +1,26 @@
 
-use rustc_hir::PathSegment;
-use rustc_middle::ty::TyCtxt;
-
-use rustc_span::def_id::DefId;
-use rustc_hir::def_id::CrateNum;
 use rustc_hir::definitions::DefPath;
 use rustc_hir::definitions::DefPathData;
 use rustc_hir::hir_id::OwnerId;
 
-use rustc_hir::HirId;
 use rustc_hir::Node;
-use rustc_hir::Item;
 use rustc_hir::ItemKind;
-use rustc_hir::Ty;
 use rustc_hir::TyKind;
 use rustc_hir::QPath;
-use rustc_hir::ImplItemId;
 use rustc_hir::ImplItem;
-use rustc_hir::ImplItemKind;
 use rustc_hir::FnSig;
 use rustc_hir::FnRetTy;
+use rustc_hir::Ty;
 use rustc_hir::Generics;
 use rustc_hir::GenericArg;
+use rustc_hir::ImplItemKind;
 
 use tracing::{info, debug, warn, trace};
 
-use crate::ModuleDecl;
-
-type FnDecl = super::FnDecl;
-type TypeDecl = super::TypeDecl;
-type TypeCategory = super::TypeCategory;
+use crate::{ModuleDecl, TypeCategory, TypeDecl, FnDecl};
+use crate::support::ProcessContext;
 
 type WalkResult<T> = std::result::Result<T, String>;
-
-pub struct ProcessContext<'ctx> {
-    raw_context: TyCtxt<'ctx>,
-    root_crate_symbol: String,
-}
-
-pub enum WalkOutput {
-    Fn(Vec<FnDecl>),
-    TypeAlias { target: String, alias_decl: TypeDecl },
-    None,
-}
-
-impl ProcessContext<'_> {
-    pub fn new<'ctx>(raw_context: TyCtxt<'ctx>, root_crate: &str) -> ProcessContext<'ctx> {
-        ProcessContext { 
-            raw_context, 
-            root_crate_symbol: root_crate.to_string(),
-        }
-    }
-
-    pub fn walk_item<'hir, F>(&self, f: F) -> Vec<FnDecl>
-        where F: Fn(HirId, DefId, &Item) -> WalkOutput
-    {
-        let mut fns = vec![];
-
-        for id in self.raw_context.hir().items() {
-            let item = self.raw_context.hir().item(id);
-
-            match f(id.hir_id(), item.owner_id.def_id.to_def_id(), &item) {
-                WalkOutput::Fn(mut decls) => {
-                    fns.append(&mut decls);
-                }
-                WalkOutput::TypeAlias { target: _target, alias_decl: _alias_decl } => {
-
-                },
-                WalkOutput::None => {},
-            };
-        };
-
-        fns
-    }
-
-    pub fn is_hidden_item(&self, def_id: DefId) -> bool {
-        !self.raw_context.visibility(def_id).is_public()
-    }
-
-    pub fn node_of(&self, def_id: DefId) -> Node {
-        self.raw_context.hir_node_by_def_id(def_id.expect_local())
-    }
-
-    pub fn crate_name_of(&self, krate: CrateNum) -> String {
-        match krate.index() {
-            0 => self.root_crate_symbol.to_string(),
-            _ => self.raw_context.crate_name(krate).to_string(),
-        }
-    }
-
-    pub fn parent_hir_id(&self, hir_id: HirId) -> HirId {
-        self.raw_context.parent_hir_id(hir_id)
-    }
-
-    pub fn def_path(&self, def_id: &DefId) -> DefPath {
-        self.raw_context.def_path(*def_id)
-    }
-
-    pub fn impl_item(&self, id: ImplItemId) -> &ImplItem {
-        self.raw_context.hir().impl_item(id)
-    }
-
-    pub fn lookup_deprecation(&self, def_id: DefId) -> Option<rustc_attr::Deprecation> {
-        self.raw_context.lookup_deprecation(def_id)
-    }
-}
 
 pub struct ProcessHandler;
 
@@ -113,6 +29,8 @@ impl ProcessHandler {
         ctx.walk_item(|hir_id, _def_id, item| {
             match item.kind {
                 ItemKind::Impl(impl_def) if impl_def.items.len() > 0 => {
+                    info!("## ItemKind::Impl");
+
                     debug!("impl_def: {:?}", impl_def);
 
                     let owner = 
@@ -120,14 +38,16 @@ impl ProcessHandler {
                         .map_err(|err| warn!(err))
                         .ok()
                     ;
-                    info!("Owner type: {:?}", owner);
+                    info!("ItemKind::Impl: Owner type: {:?}", owner);
 
-                    return WalkOutput::Fn(impl_def.items.iter()
+                    return Some(impl_def.items.iter()
                         .filter_map(|item| walk_impl_item(ctx, &ctx.impl_item(item.id), &owner))
                         .collect::<Vec<_>>()
                     );
                 }
                 ItemKind::Fn(FnSig { decl, .. }, generics, _) => {
+                    info!("## ItemKind::Fn (global function)");
+
                     let parent_id = ctx.parent_hir_id(hir_id);
                     let defpath = ctx.def_path(&parent_id.owner.to_def_id());
                     let owner_crate = ctx.crate_name_of(defpath.krate);
@@ -141,61 +61,36 @@ impl ProcessHandler {
                     debug!("Global function (name: {}, mod: {:?})", owner.category, owner.module);
 
                     let prototype_name = format_prototype_name(item.ident.as_str(), &generics);
-                    let fn_decl = walk_function_item(ctx, item.owner_id, decl, &prototype_name, &Some(owner));
                     
-                    return match fn_decl {
-                        Some(x) => WalkOutput::Fn(vec![x]),
-                        None => WalkOutput::None,
-                    };
+                    return walk_function_item(ctx, item.owner_id, decl, &prototype_name, &Some(owner)).map(|x| vec![x]);
                 }
-                ItemKind::TyAlias(ty, _) => {
-                    debug!("type_alias.decl: {:?}", ty);
+                // ItemKind::TyAlias(ty, _) => {
+                //     info!("## ItemKind::TyAlias");
 
-                    if let Ok(ref decl) = walk_type_item(ctx, &ty) {
-                        let lhs_parent_id = ctx.parent_hir_id(hir_id);
-                        let lhs_parent_defpath = ctx.def_path(&lhs_parent_id.owner.to_def_id());
-                        let lhs_mod = ModuleDecl {
-                            path: mod_from_defpath(&lhs_parent_defpath),
-                            krate: Some(ctx.crate_name_of(lhs_parent_defpath.krate)),
-                        };
+                //     debug!("type_alias.decl: {:?}", ty);
 
-                        let lhs_deprecated = ctx.lookup_deprecation(lhs_parent_id.owner.to_def_id());
+                //     if let Ok(ref decl) = walk_type_item(ctx, &ty) {
+                //         let lhs_parent_id = ctx.parent_hir_id(hir_id);
+                //         let lhs_parent_defpath = ctx.def_path(&lhs_parent_id.owner.to_def_id());
+                //         debug!("type_alias.path.lhs: {lhs_parent_defpath:?}");
 
-                        info!("TyAlias: {} <- {}", 
-                            format!("{}::{}", lhs_mod, item.ident.as_str()), 
-                            decl.category.prefix_with(Some(&decl.module))
-                        );
+                //         let lhs_mod = ModuleDecl {
+                //             path: mod_from_defpath(&lhs_parent_defpath),
+                //             krate: Some(ctx.crate_name_of(lhs_parent_defpath.krate)),
+                //         };
 
-                        return WalkOutput::TypeAlias { 
-                            target: decl.category.prefix_with(Some(&decl.module)), 
-                            alias_decl: TypeDecl {
-                                category: TypeCategory::Symbol(item.ident.as_str().to_string()),
-                                module: lhs_mod,
-                                deprecation: lhs_deprecated,
-                            }
-                        }
-                    }
-                    else {
-                        return WalkOutput::None;
-                    }
-                }
-                ItemKind::Use(path, kind) => {
-                    debug!("use.decl.kind: {kind:?}");
-                    debug!("use.decl.path: {path:?}");
-                    if let Some(PathSegment { ident, hir_id, .. }) = path.segments.last() {
-                        debug!("use.decl.symbol: {ident:?}");
+                //         let lhs_deprecated = ctx.lookup_deprecation(lhs_parent_id.owner.to_def_id());
+                //         debug!("type_alias.deprecated: {:?}", lhs_deprecated);
 
-                        if let rustc_hir::Node::Item(node_item) = ctx.node_of(hir_id.owner.to_def_id()) {
-                            debug!("use.decl.node: {:?}", node_item);
-                        }
-                    }
-                    return WalkOutput::None;
-                }
-                ItemKind::ExternCrate(Some(crate_symbol)) => {
-                    debug!("extern_crate.decl: {crate_symbol:?}");
-                    return WalkOutput::None;
-                }
+                //         info!("TyAlias: {} <- {}", 
+                //             format!("{}::{}", lhs_mod, item.ident.as_str()), 
+                //             decl.category.prefix_with(Some(&decl.module))
+                //         );
+                //     }
+                // }
+                ItemKind::TyAlias(_, _) |
 
+                ItemKind::Use(_, _) |
                 ItemKind::Mod(_) |
                 ItemKind::ForeignMod { .. } |
                 ItemKind::Const(_, _, _) |
@@ -207,7 +102,7 @@ impl ProcessHandler {
                 ItemKind::GlobalAsm(_) |
                 ItemKind::Impl(_) |
                 ItemKind::ExternCrate(_) => {
-                    trace!("unsupported item: {:?}", item.kind)
+                    trace!("skip: unsupported item of {:?}", item.kind)
                 }
 
                 ItemKind::TraitAlias(_, _) |
@@ -216,7 +111,7 @@ impl ProcessHandler {
                     warn!("todo: {:?}", item.kind);
                 }
             }
-            WalkOutput::None    
+            None    
         })
     }
 }
@@ -237,6 +132,7 @@ fn walk_impl_owner(ctx: &ProcessContext, impl_def: &rustc_hir::Impl) -> WalkResu
         }
         None => {
             let mut decl = walk_type_item(ctx, &impl_def.self_ty)?;
+
             trace!("(*1) Impl owner deprecation (type): {:?}", decl.deprecation);
             decl.deprecation = decl.deprecation.or_else(|| ctx.lookup_deprecation(impl_def.self_ty.hir_id.owner.to_def_id()));
             trace!("(*2) Impl owner deprecation (type): {:?}", decl.deprecation);
@@ -328,13 +224,13 @@ fn walk_function_item(ctx: &ProcessContext, owner_id: OwnerId, decl: &rustc_hir:
         args,
     };
     info!("(fn.qual): {}", fn_decl);
-    debug!("(fndecl): {:?}", fn_decl);
+    debug!("(fn.decl): {:?}", fn_decl);
 
     Some(fn_decl)
 }
 
 fn walk_return_type_item(ctx: &ProcessContext, type_item: &FnRetTy) -> WalkResult<Option<TypeDecl>> {
-    debug!("ret_decl: {:?}", type_item);
+    debug!("fn.ret_decl: {:?}", type_item);
     match type_item {
         FnRetTy::Return(ty) => walk_type_item(ctx, &ty).map(Option::Some),
         FnRetTy::DefaultReturn(_) => {
@@ -396,9 +292,9 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
             }
         }
         TyKind::TraitObject(_, _, _) => {
-            warn!("TraitObject is complecated... so retired!");
+            warn!("todo: TraitObject is complecated... so retired!");
             Ok(TypeDecl {
-                category: crate::TypeCategory::Symbol("TraitObject".to_string()),
+                category: crate::TypeCategory::Symbol("*DynTrait*".to_string()),
                 module: ModuleDecl::none(),
                 deprecation: None,
             })
@@ -413,7 +309,25 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
 
         TyKind::InferDelegation(_, _) => Err("InferDelegation".to_string()),
         TyKind::AnonAdt(_) => Err("AnonAdt".to_string()),
-        TyKind::OpaqueDef(_, _, _) => Err("OpaqueDef".to_string()),
+        TyKind::OpaqueDef(item_id, _, _) => {
+            let item = ctx.item_of(item_id);
+
+            match item.kind {
+                ItemKind::OpaqueTy(rustc_hir::OpaqueTy{ bounds, .. }) => {
+                    warn!("todo: ImplTrait is complecated... so retired!");
+                    debug!("OpaqueDef: bounds: {bounds:?}");
+
+                    Ok(TypeDecl {
+                        category: crate::TypeCategory::Symbol("*ImplTrait*".to_string()),
+                        module: ModuleDecl::none(),
+                        deprecation: None,
+                    })
+                }
+                _ => {
+                    Err("not implemented: OpaqueDef".to_string())
+                }
+            }
+        }
         TyKind::Typeof(_) => Err("Typeof".to_string()),
         TyKind::Infer => Err("Infer".to_string()),
         TyKind::Err(_) => Err("Err".to_string()),
@@ -464,6 +378,24 @@ fn mod_from_segments(segments: &[rustc_hir::PathSegment]) -> Option<String> {
     }
 }
 
+fn use_path_from_defpath(defpath: &DefPath) -> Option<String> {
+    match defpath.data.len() > 0 {
+        true => {
+            let path = defpath.data.iter()
+                .filter_map(|x| match x.data {
+                    DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
+                    DefPathData::ValueNs(ns) => Some(ns.as_str().to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<String>>()
+                .join("::")
+            ;
+            Some(path)
+        }
+        false => None,
+    }
+}
+
 fn symbol_from_defpath(defpath: &DefPath, segments: &[rustc_hir::PathSegment]) -> String {
     defpath.data.iter().last()
     .and_then(|x| match x.data {
@@ -494,6 +426,26 @@ fn mod_from_defpath(defpath: &DefPath) -> Option<String> {
 }
 
 fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segments: &[rustc_hir::PathSegment]) -> TypeDecl {
+    match resolve_qualified_type_opt(ctx, res, segments) {
+        Some(mut decl) => {
+            if let Some(import_mod) = ctx.reexport_module(&decl) {
+                debug!("re-export type replaced: from: {:?}, to: {:?}", decl, import_mod);
+                decl.module = import_mod;
+            }
+
+            decl
+        }
+        None => {
+            TypeDecl {
+                category: TypeCategory::Symbol(format!("***{:?}***", res)),
+                module: ModuleDecl::none(),
+                deprecation: None,
+            }
+        }
+    }
+}
+
+fn resolve_qualified_type_opt(ctx: &ProcessContext, res: &rustc_hir::def::Res, segments: &[rustc_hir::PathSegment]) -> Option<TypeDecl> {
     match res {
         rustc_hir::def::Res::Def(_, def_id) => {
             let deprecation = ctx.lookup_deprecation(*def_id);
@@ -501,58 +453,52 @@ fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segme
         
             let defpath = ctx.def_path(def_id);
             let crate_name = ctx.crate_name_of(defpath.krate);
-            debug!("defpath: {:?}", defpath);
+            debug!("type.qual.defpath: {:?}", defpath);
 
             let mod_path = mod_from_defpath(&defpath);
             let symbol = symbol_from_defpath(&defpath, segments);
 
-            TypeDecl {
+            Some(TypeDecl {
                 category: TypeCategory::Symbol(symbol),
                 module: ModuleDecl {
                     path: mod_path,
                     krate: Some(crate_name),
                 },
                 deprecation,
-            }
+            })
         }
         rustc_hir::def::Res::SelfTyAlias {alias_to: def_id, .. } => {
             match ctx.node_of(*def_id) {
                 Node::Item(rustc_hir::Item { kind: ItemKind::Impl( rustc_hir::Impl { self_ty, .. }), .. }) => {
                     info!("(SelfTyAlias) retry `walk_type_item` for resolving type");
                     if let Ok(type_decl) = walk_type_item(ctx, self_ty) {
-                        return TypeDecl { category: TypeCategory::SelfAlias(Box::new(type_decl.category)), ..type_decl };
+                        return Some(TypeDecl { category: TypeCategory::SelfAlias(Box::new(type_decl.category)), ..type_decl });
                     };
                 }
                 _ => {}
             }
             
-            TypeDecl {
+            Some(TypeDecl {
                 category: TypeCategory::Symbol(symbol_from_segments(segments),),
                 module: ModuleDecl::none(),
                 deprecation: None,
-            }
+            })
         }
         rustc_hir::def::Res::PrimTy(ty) => {
-            TypeDecl {
+            Some(TypeDecl {
                 category: TypeCategory::Symbol(ty.name_str().to_string()),
                 module: ModuleDecl::none(),
                 deprecation: None,
-            }
+            })
         }
         rustc_hir::def::Res::Err if segments.len() > 0 => {
-            TypeDecl {
+            Some(TypeDecl {
                 category: TypeCategory::Symbol(symbol_from_segments(segments)),
                 module: ModuleDecl { path: mod_from_segments(segments), krate: None },
                 deprecation: None,
-            }
+            })
         }
-        _ => {
-            TypeDecl {
-                category: TypeCategory::Symbol(format!("***{:?}***", res)),
-                module: ModuleDecl::none(),
-                deprecation: None,
-            }
-        }
+        _ => None,
     }
 }
 
@@ -598,5 +544,256 @@ fn format_prototype_name(prototype_name: &str, generics: &Generics) -> String {
     match pick_defined_generic_params(generics) {  
         Some(generic_param_names) => format!("{}<{}>", prototype_name.to_string(), generic_param_names),
         None => prototype_name.to_string(),
+    }
+}
+
+pub mod import_handler {
+    use rustc_hir::def::DefKind;
+    use rustc_hir::def::Res;
+    use rustc_hir::def_id::DefId;
+    use rustc_hir::def_id::DefIdSet;
+    use rustc_hir::HirId;
+    use rustc_hir::UseKind;
+    use rustc_middle::ty::Visibility;
+    use tracing::{info, debug, warn};
+    use std::collections::HashMap;
+    use super::ItemKind;
+
+    use crate::ModuleDecl;
+    use crate::support::*;
+    use crate::TypeDecl;
+
+    pub fn handle_extract(ctx: &ProcessContext) -> HashMap<String, ImportConfig> {
+        ctx.walk_import_item(|hir_id, _def_id, item| {
+            match item.kind {
+                ItemKind::Use(path, kind) => {
+                    info!("# ItemKind::Use: {:?}", item.vis_span);
+                    walk_use(ctx, hir_id, path, kind)
+                }
+                ItemKind::Mod(rustc_hir::Mod { item_ids, .. }) => {
+                    info!("# ItemKind::Mod: {:?}", item.vis_span);
+                    walk_mod(ctx, hir_id, item_ids)
+                }
+                _ => {
+                    debug!("skip import kind: {:?}", item.kind);
+                    None
+                }
+            }
+        })
+    }
+
+    fn walk_mod(ctx: &ProcessContext, hir_id: HirId, item_ids: &[rustc_hir::ItemId]) -> Option<Vec<ImportConfig>> {
+        let defpath = ctx.def_path(&hir_id.owner.to_def_id());
+        debug!("mod.decl.defpath: {:?}", defpath);
+
+        if is_prelude_mod(&defpath) {
+            info!("skip: (mod.decl) prelude module");
+            return None;
+        }
+
+        let module = ModuleDecl {
+            path: super::use_path_from_defpath(&defpath),
+            krate: Some(ctx.crate_name_of(defpath.krate)),
+        };
+
+        walk_mod_internal(ctx, hir_id, item_ids, &module, &mut DefIdSet::new())
+    }
+
+    fn walk_mod_internal(ctx: &ProcessContext, hir_id: HirId, item_ids: &[rustc_hir::ItemId], module: &ModuleDecl, visited: &mut DefIdSet) -> Option<Vec<ImportConfig>> {
+        if Visibility::<DefId>::Public != ctx.visibility(&hir_id.owner.to_def_id()) {
+            info!("skip: private mod");
+            return None;
+        }
+
+        let configs = item_ids.into_iter()
+            .filter_map(|item_id| {
+                let child_item = ctx.item_of(*item_id);
+                debug!("child_item's parent: {:?}", ctx.parent_module_of(child_item.hir_id()));
+
+                let def_id = hir_id.owner.to_def_id();
+
+                match child_item.kind {
+                    ItemKind::Use(path, kind) => {
+                        walk_use_internal(ctx, child_item.hir_id(), path, kind, module, visited)
+                    }
+                    ItemKind::Mod(rustc_hir::Mod { item_ids, .. }) => {
+                        if ! visited.insert(def_id) { return None; }
+
+                        debug!("# Mod import from Mod: {:?}", child_item.ident);
+                        
+                        let child_module_path = match &module.path {
+                            Some(path) => format!("{path}::{}", child_item.ident.as_str()),
+                            None => child_item.ident.as_str().to_string(),
+                        };
+                        let module = ModuleDecl { 
+                            path: Some(child_module_path), 
+                            krate: module.krate.clone(),
+                        };
+
+                        walk_mod_internal(ctx, child_item.hir_id(), item_ids, &module, visited)
+                    }
+                    _ => None
+                }
+            })
+            .flatten()
+            .collect::<Vec<_>>()
+        ;
+        return Some(configs);
+    }
+
+    fn walk_use(ctx: &ProcessContext, hir_id: HirId, path: &rustc_hir::UsePath, kind: UseKind) -> Option<Vec<ImportConfig>> {
+        let defpath = ctx.def_path(&hir_id.owner.to_def_id());
+        debug!("use.decl.defpath: {:?}", defpath);
+
+        if is_prelude_mod(&defpath) {
+            info!("skip: (use.decl) prelude module");
+            return None;
+        }
+
+        let module = ModuleDecl {
+            path: super::use_path_from_defpath(&defpath),
+            krate: Some(ctx.crate_name_of(defpath.krate)),
+        };
+        
+        walk_use_internal(ctx, hir_id, path, kind, &module, &mut DefIdSet::new())
+    }
+
+    fn walk_use_internal(ctx: &ProcessContext, hir_id: HirId, path: &rustc_hir::UsePath, kind: UseKind, module: &ModuleDecl, visited: &mut DefIdSet) -> Option<Vec<ImportConfig>> {
+        debug!("use.decl: {kind:?}, {path:?}");
+        debug!("use.decl.attrs: {:?}", ctx.attrs_of(hir_id).into_iter().map(|attr| attr.meta_item_list()).collect::<Vec<_>>());
+        debug!("use.decl.module: {:?}", module);
+
+        if Visibility::<DefId>::Public != ctx.visibility(&hir_id.owner.to_def_id()) {
+            info!("skip: private import {:?}", path.span);
+            return None;
+        }
+        
+        if is_import_from_prelude(ctx.attrs_of(hir_id)) {
+            info!("skip: because of prelude {:?}", path.span);
+            return None;
+        }
+
+        match kind {
+            UseKind::Single |
+            UseKind::ListStem => {
+                return walk_use_item(ctx, path.res.first(), module, visited);
+            }
+            UseKind::Glob => {
+                return walk_glob_use(ctx, path.res.first(), module, visited);   
+            }
+        }
+    }
+
+    fn walk_glob_use<ResId>(ctx: &ProcessContext, res: Option<&Res<ResId>>, module: &ModuleDecl, visited: &mut DefIdSet) -> Option<Vec<ImportConfig>> 
+        where ResId: std::fmt::Debug    
+    {
+        match res {
+            Some(Res::Def(DefKind::Mod, def_id)) => {
+                if def_id.is_local() { 
+                    info!("skipped because import from private mod: {:?}", def_id);
+                    return None; 
+                }
+
+                let children = ctx.mod_items_of(def_id);
+                debug!("use.mod.child.len: {}", children.len());
+
+                let configs = children.into_iter()
+                    .filter_map(|c| {
+                        if c.vis != Visibility::Public { return None; }
+                        if let Res::Def(DefKind::Use | DefKind::Mod, ..) = c.res {
+                            if let Some(mod_def_id) = c.res.mod_def_id() {
+                                if mod_def_id != *def_id { return None; }
+
+                                if let Some(mod_def_id) = c.res.opt_def_id() {
+                                    info!("avoiding recursive child mod: {res:?}");
+                                    if ! visited.insert(mod_def_id) { return None; }
+                                }
+                            }
+
+                            info!("## Processing child import");
+                            return walk_use_item(ctx, Some(&c.res), module, visited);
+                        }
+                        None
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>()
+                ;
+
+                return Some(configs);
+            }
+            _ => {
+                warn!("(todo: no entry) UseKind::Glob: {:?}", res);
+                None
+            }
+        }     
+    }
+
+    fn walk_use_item<ResId>(ctx: &ProcessContext, res: Option<&Res<ResId>>, module: &ModuleDecl, visited: &mut DefIdSet) -> Option<Vec<ImportConfig>>
+        where ResId: std::fmt::Debug
+    {
+        if let Some(Res::Def(kind, def_id)) = res {
+            match kind {
+                DefKind::Struct |
+                DefKind::Union |
+                DefKind::Enum |
+                DefKind::Trait |
+                DefKind::TyAlias => {
+                    if let Some(rhs_type) = super::resolve_qualified_type_opt(ctx, &Res::Def(*kind, *def_id), &Vec::new()) {
+                        debug!("use.decl.symbol: {}#", rhs_type.category);
+                        debug!("use.decl.from: {}, decl: {rhs_type:?}", rhs_type.category.prefix_with(Some(&rhs_type.module)));
+            
+                        let lhs_type = TypeDecl {
+                            category: rhs_type.category.clone(),
+                            module: module.clone(),
+                            deprecation: None,
+                        };
+                        debug!("use.decl.to: {}, decl: {lhs_type:?}", lhs_type.category.prefix_with(Some(&lhs_type.module)));
+                        info!("use.decl.accepted from: {:?}, to: {:?}", rhs_type, lhs_type);
+
+                        return Some(vec![ImportConfig::new(rhs_type, lhs_type)]);
+                    }
+                }
+                DefKind::Mod => {
+                    if ! visited.insert(*def_id) {
+                        info!("avoiding recursive mod: {res:?}");
+                        return None;
+                    }
+
+                    info!("treat mod use as glob: {res:?}, xlen: {}", visited.len()+1);
+                    
+                    let configs = walk_glob_use(ctx, res, module, visited); 
+
+                    return configs;
+                }
+
+                DefKind::Variant |
+                DefKind::ForeignTy |
+                DefKind::TraitAlias |
+                DefKind::AssocTy |
+                DefKind::TyParam |
+                DefKind::Const |
+                DefKind::ConstParam |
+                DefKind::Static { .. } |
+                DefKind::Ctor(_, _) |
+                DefKind::AssocFn |
+                DefKind::AssocConst |
+                DefKind::Macro(_) |
+                DefKind::ExternCrate |
+                DefKind::Use |
+                DefKind::ForeignMod |
+                DefKind::AnonConst |
+                DefKind::InlineConst |
+                DefKind::OpaqueTy |
+                DefKind::Field |
+                DefKind::LifetimeParam |
+                DefKind::GlobalAsm |
+                DefKind::Impl { .. } |
+                DefKind::Fn |
+                DefKind::Closure => {
+                    warn!("todo: not implemented variants: {:?}, res: {:?}", kind, res);
+                }
+            }
+        }
+        None
     }
 }

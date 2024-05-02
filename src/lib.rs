@@ -9,6 +9,7 @@ extern crate rustc_errors;
 extern crate rustc_driver; 
 extern crate rustc_middle; 
 extern crate rustc_attr; 
+extern crate rustc_ast;
 
 use std::fmt::Display;
 
@@ -294,3 +295,4 @@ impl Serialize for FnDecl {
 pub mod compile;
 pub mod core;
 pub mod print;
+pub mod support;

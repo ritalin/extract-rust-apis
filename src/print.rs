@@ -1,6 +1,6 @@
 use std::path::{PathBuf, Path};
-use serde::{Serialize};
-use tracing::{error};
+use serde::Serialize;
+use tracing::error;
 
 
 type FnDecl = super::FnDecl;
