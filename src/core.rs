@@ -1,4 +1,5 @@
 
+use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_hir::definitions::DefPath;
 use rustc_hir::definitions::DefPathData;
 use rustc_hir::hir_id::OwnerId;
@@ -39,6 +40,7 @@ impl ProcessHandler {
                         .ok()
                     ;
                     info!("ItemKind::Impl: Owner type: {:?}", owner);
+                    
 
                     return Some(impl_def.items.iter()
                         .filter_map(|item| walk_impl_item(ctx, &ctx.impl_item(item.id), &owner))
@@ -54,7 +56,7 @@ impl ProcessHandler {
 
                     let owner = TypeDecl {
                         category: TypeCategory::Symbol(symbol_from_defpath(&defpath, &vec![])),
-                        module: ModuleDecl { path: mod_from_defpath(&defpath), krate: Some(owner_crate) },
+                        module: ModuleDecl { path: mod_from_defpath(&defpath), generics: None, krate: Some(owner_crate) },
                         deprecation: None,
                     };
 
@@ -117,12 +119,18 @@ impl ProcessHandler {
 }
 
 fn walk_impl_owner(ctx: &ProcessContext, impl_def: &rustc_hir::Impl) -> WalkResult<TypeDecl> {
+
     let decl = match impl_def.of_trait {
         Some(rustc_hir::TraitRef { path, hir_ref_id, .. }) => {
             let mut decl = resolve_qualified_type(ctx, &path.res, path.segments);
 
             if let Some(generic_params) = pick_bound_generic_params(ctx, path.segments.first()) {
                 decl.category = decl.category.append_generic_params(generic_params);
+            }
+
+            let impl_generics = pick_defined_generic_params(impl_def.generics);
+            if !impl_generics.is_empty() {
+                decl.module.generics = Some(impl_generics);
             }
 
             trace!("(*1) Impl owner deprecation (trait): {:?}", decl.deprecation);
@@ -132,6 +140,11 @@ fn walk_impl_owner(ctx: &ProcessContext, impl_def: &rustc_hir::Impl) -> WalkResu
         }
         None => {
             let mut decl = walk_type_item(ctx, &impl_def.self_ty)?;
+
+            let impl_generics = pick_defined_generic_params(impl_def.generics);
+            if !impl_generics.is_empty() {
+                decl.module.generics = Some(impl_generics);
+            }
 
             trace!("(*1) Impl owner deprecation (type): {:?}", decl.deprecation);
             decl.deprecation = decl.deprecation.or_else(|| ctx.lookup_deprecation(impl_def.self_ty.hir_id.owner.to_def_id()));
@@ -196,32 +209,32 @@ fn walk_function_item(ctx: &ProcessContext, owner_id: OwnerId, decl: &rustc_hir:
     ;
 
     debug!("(fn.deprecated) {:?}", deprecation);
-
     
-    let fn_module = match owner {
-        Some(TypeDecl { category: cat, module: ModuleDecl { path: Some(path), krate }, .. }) => {
-            ModuleDecl {
-                path: Some(format!("{}::{}", path, cat.to_string())),
-                krate: krate.clone(),
-            }
-        }
-        Some(TypeDecl { category: cat, module: ModuleDecl { path: None, krate }, .. }) => {
-            ModuleDecl {
-                path: Some(cat.to_string()),
-                krate: krate.clone(),
-            }
-        }
-        None => ModuleDecl::none(),
-    };
+    // let fn_module = match owner {
+    //     Some(TypeDecl { category: cat, module: ModuleDecl { path: Some(path), krate }, .. }) => {
+    //         ModuleDecl {
+    //             path: Some(format!("{}::{}", path, cat.to_string())),
+    //             krate: krate.clone(),
+    //         }
+    //     }
+    //     Some(TypeDecl { category: cat, module: ModuleDecl { path: None, krate }, .. }) => {
+    //         ModuleDecl {
+    //             path: Some(cat.to_string()),
+    //             krate: krate.clone(),
+    //         }
+    //     }
+    //     None => ModuleDecl::none(),
+    // };
 
     let fn_decl = FnDecl {
         proto: TypeDecl {
             category: TypeCategory::Symbol(proto_symbol.to_string()),
-            module: fn_module,
+            module: ModuleDecl::none(),
             deprecation,
         },
         ret_decl,
         args,
+        owner: owner.clone(),
     };
     info!("(fn.qual): {}", fn_decl);
     debug!("(fn.decl): {:?}", fn_decl);
@@ -294,7 +307,7 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
         TyKind::TraitObject(_, _, _) => {
             warn!("todo: TraitObject is complecated... so retired!");
             Ok(TypeDecl {
-                category: crate::TypeCategory::Symbol("*DynTrait*".to_string()),
+                category: crate::TypeCategory::Symbol("{DynTrait}".to_string()),
                 module: ModuleDecl::none(),
                 deprecation: None,
             })
@@ -318,7 +331,7 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
                     debug!("OpaqueDef: bounds: {bounds:?}");
 
                     Ok(TypeDecl {
-                        category: crate::TypeCategory::Symbol("*ImplTrait*".to_string()),
+                        category: crate::TypeCategory::Symbol("{ImplTrait}".to_string()),
                         module: ModuleDecl::none(),
                         deprecation: None,
                     })
@@ -379,19 +392,17 @@ fn mod_from_segments(segments: &[rustc_hir::PathSegment]) -> Option<String> {
 }
 
 fn use_path_from_defpath(defpath: &DefPath) -> Option<String> {
-    match defpath.data.len() > 0 {
-        true => {
-            let path = defpath.data.iter()
-                .filter_map(|x| match x.data {
-                    DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
-                    DefPathData::ValueNs(ns) => Some(ns.as_str().to_string()),
-                    _ => None,
-                })
-                .collect::<Vec<String>>()
-                .join("::")
-            ;
-            Some(path)
-        }
+    let path = defpath.data.iter()
+        .filter_map(|x| match x.data {
+            DefPathData::TypeNs(ns) => Some(ns.as_str().to_string()),
+            DefPathData::ValueNs(ns) => Some(ns.as_str().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<String>>()
+    ;
+
+    match path.len() > 0 {
+        true => Some(path.join("::")),
         false => None,
     }
 }
@@ -427,11 +438,11 @@ fn mod_from_defpath(defpath: &DefPath) -> Option<String> {
 
 fn resolve_qualified_type(ctx: &ProcessContext, res: &rustc_hir::def::Res, segments: &[rustc_hir::PathSegment]) -> TypeDecl {
     match resolve_qualified_type_opt(ctx, res, segments) {
-        Some(mut decl) => {
-            if let Some(import_mod) = ctx.reexport_module(&decl) {
-                debug!("re-export type replaced: from: {:?}, to: {:?}", decl, import_mod);
-                decl.module = import_mod;
-            }
+        Some(decl) => {
+            // if let Some(import_mod) = ctx.reexport_module(&decl) {
+            //     debug!("re-export type replaced: from: {:?}, to: {:?}", decl, import_mod);
+            //     decl.module = import_mod;
+            // }
 
             decl
         }
@@ -462,6 +473,7 @@ fn resolve_qualified_type_opt(ctx: &ProcessContext, res: &rustc_hir::def::Res, s
                 category: TypeCategory::Symbol(symbol),
                 module: ModuleDecl {
                     path: mod_path,
+                    generics: None,
                     krate: Some(crate_name),
                 },
                 deprecation,
@@ -485,8 +497,10 @@ fn resolve_qualified_type_opt(ctx: &ProcessContext, res: &rustc_hir::def::Res, s
             })
         }
         rustc_hir::def::Res::PrimTy(ty) => {
+            debug!("prim crate: {} {:?}", ty.name_str().to_string(), Some(ctx.crate_name_of(LOCAL_CRATE)));
             Some(TypeDecl {
-                category: TypeCategory::Symbol(ty.name_str().to_string()),
+                category: TypeCategory::Primitive(ty.name_str().to_string()),
+                // module: ModuleDecl { path: None, generics: None, krate: Some(ctx.crate_name_of(LOCAL_CRATE)) },
                 module: ModuleDecl::none(),
                 deprecation: None,
             })
@@ -494,7 +508,7 @@ fn resolve_qualified_type_opt(ctx: &ProcessContext, res: &rustc_hir::def::Res, s
         rustc_hir::def::Res::Err if segments.len() > 0 => {
             Some(TypeDecl {
                 category: TypeCategory::Symbol(symbol_from_segments(segments)),
-                module: ModuleDecl { path: mod_from_segments(segments), krate: None },
+                module: ModuleDecl { path: mod_from_segments(segments), generics: None, krate: None },
                 deprecation: None,
             })
         }
@@ -502,22 +516,15 @@ fn resolve_qualified_type_opt(ctx: &ProcessContext, res: &rustc_hir::def::Res, s
     }
 }
 
-fn pick_defined_generic_params(generics: &Generics) -> Option<String> {
-    let generic_param_names = 
-        generics.params.into_iter().filter_map(|p| match (p.name, p.kind) {
-            (_, rustc_hir::GenericParamKind::Lifetime { .. }) => None,
-            (rustc_hir::ParamName::Plain(param_name), _) => {
-                Some(param_name.as_str().to_string())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-    ;
-
-    match generic_param_names.len() == 0 {  
-        true => None,
-        false => Some(generic_param_names.join(",")),
-    } 
+fn pick_defined_generic_params(generics: &Generics) -> Vec<String> {
+    generics.params.into_iter().filter_map(|p| match (p.name, p.kind) {
+        (_, rustc_hir::GenericParamKind::Lifetime { .. }) => None,
+        (rustc_hir::ParamName::Plain(param_name), _) => {
+            Some(param_name.as_str().to_string())
+        }
+        _ => None,
+    })
+    .collect::<Vec<_>>()
 }
 
 fn pick_bound_generic_params(ctx: &ProcessContext, generics: Option<&rustc_hir::PathSegment>) -> Option<String> {
@@ -541,9 +548,11 @@ fn pick_bound_generic_params(ctx: &ProcessContext, generics: Option<&rustc_hir::
 
 
 fn format_prototype_name(prototype_name: &str, generics: &Generics) -> String {
-    match pick_defined_generic_params(generics) {  
-        Some(generic_param_names) => format!("{}<{}>", prototype_name.to_string(), generic_param_names),
-        None => prototype_name.to_string(),
+    let impl_item_generics = pick_defined_generic_params(generics);
+    
+    match impl_item_generics.len() > 0 {  
+        true => format!("{}<{}>", prototype_name.to_string(), impl_item_generics.as_slice().join(", ")),
+        false => prototype_name.to_string(),
     }
 }
 
@@ -593,6 +602,7 @@ pub mod import_handler {
 
         let module = ModuleDecl {
             path: super::use_path_from_defpath(&defpath),
+            generics: None,
             krate: Some(ctx.crate_name_of(defpath.krate)),
         };
 
@@ -627,6 +637,7 @@ pub mod import_handler {
                         };
                         let module = ModuleDecl { 
                             path: Some(child_module_path), 
+                            generics: None,
                             krate: module.krate.clone(),
                         };
 
@@ -652,6 +663,7 @@ pub mod import_handler {
 
         let module = ModuleDecl {
             path: super::use_path_from_defpath(&defpath),
+            generics: None,
             krate: Some(ctx.crate_name_of(defpath.krate)),
         };
         
@@ -699,8 +711,9 @@ pub mod import_handler {
 
                 let configs = children.into_iter()
                     .filter_map(|c| {
-                        if c.vis != Visibility::Public { return None; }
-                        if let Res::Def(DefKind::Use | DefKind::Mod, ..) = c.res {
+                        debug!("use.mod.child: {c:?}");
+                        // if c.vis != Visibility::Public { return None; }
+                        if let Res::Def(_, _) = c.res {
                             if let Some(mod_def_id) = c.res.mod_def_id() {
                                 if mod_def_id != *def_id { return None; }
 
@@ -759,9 +772,17 @@ pub mod import_handler {
                         return None;
                     }
 
-                    info!("treat mod use as glob: {res:?}, xlen: {}", visited.len()+1);
+                    let defpath = ctx.def_path(&def_id);
+
+                    let module = ModuleDecl {
+                        path: super::use_path_from_defpath(&defpath),
+                        generics: None,
+                        krate: module.krate.clone(),
+                    };
+                                
+                    info!("treat mod use as glob: defpath: {defpath:?}, res: {res:?}, xlen: {}", visited.len()+1);
                     
-                    let configs = walk_glob_use(ctx, res, module, visited); 
+                    let configs = walk_glob_use(ctx, res, &module, visited); 
 
                     return configs;
                 }

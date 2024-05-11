@@ -112,10 +112,14 @@ pub fn run(root_crate: &str, handler: ProcessHandler, fmt: PrintHandler) {
                 };
                 
                 {
-                    info!("Begining dump");
-                    fmt.handle_print(fns);
-                    info!("Dump finished");
+                    ctx.walk_import_loopup(|configs| {
+                        info!("Begining dump");
+                        fmt.handle_print(&fns, configs);
+                        info!("Dump finished");
+                    });
                 }
+
+                raw_ctx.dcx().reset_err_count();
             })
         })
     })

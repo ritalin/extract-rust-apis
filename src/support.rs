@@ -19,8 +19,8 @@ use crate::ModuleDecl;
 use crate::TypeDecl;
 
 pub struct ImportConfig { 
-    from_type: TypeDecl, 
-    to_type: TypeDecl, 
+    pub from_type: TypeDecl, 
+    pub to_type: TypeDecl, 
 }
 
 impl ImportConfig {
@@ -30,7 +30,7 @@ impl ImportConfig {
 }
 
 pub struct ProcessContext<'ctx> {
-    pub raw_context: TyCtxt<'ctx>,
+    raw_context: TyCtxt<'ctx>,
     root_crate_symbol: String,
     import_lookup: HashMap<String, ImportConfig>
 }
@@ -77,7 +77,7 @@ impl ProcessContext<'_> {
             match f(id.hir_id(), item.owner_id.def_id.to_def_id(), &item) {
                 Some(configs) => {
                     for config in configs {
-                        let from_ley = config.from_type.category.prefix_with(Some(&config.from_type.module));
+                        let from_ley = config.from_type.make_lookup_key();
 
                         if let std::collections::hash_map::Entry::Vacant(entry) = map.entry(from_ley) {
                             entry.insert(config);
@@ -93,6 +93,12 @@ impl ProcessContext<'_> {
 
     pub fn set_import_loopup(&mut self, lookup: HashMap<String, ImportConfig>) {
         self.import_lookup = lookup;
+    }
+
+    pub fn walk_import_loopup<F>(&self, f: F) 
+        where F: Fn(&[&ImportConfig])
+    {
+        f(self.import_lookup.values().collect::<Vec<_>>().as_slice());
     }
 
     pub fn is_hidden_item(&self, def_id: DefId) -> bool {
@@ -147,7 +153,7 @@ impl ProcessContext<'_> {
     }
 
     pub fn reexport_module(&self, decl: &TypeDecl) -> Option<ModuleDecl> {
-        match self.import_lookup.get(&decl.category.prefix_with(Some(&decl.module))) {
+        match self.import_lookup.get(&decl.make_lookup_key()) {
             Some(config) => Some(config.to_type.module.clone()),
             _ => None,
         }

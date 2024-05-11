@@ -10,9 +10,11 @@ fn main() {
     .with(stdout_log.with_filter(filter::LevelFilter::TRACE))
     .init();
 
-    fndump::compile::run(
-        "std", 
-        fndump::core::ProcessHandler{}, 
-        fndump::print::PrintHandler::new("std", "exp", true)
-    );
+    for crate_name in &vec!["std", "alloc", "core"] {
+        fndump::compile::run(
+            crate_name, 
+            fndump::core::ProcessHandler{}, 
+            fndump::print::PrintHandler::new(crate_name, "exp", true)
+        );
+    }
 }

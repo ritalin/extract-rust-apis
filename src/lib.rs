@@ -15,43 +15,31 @@ use std::fmt::Display;
 
 use rustc_attr::DeprecatedSince;
 
+use rustc_hir::def_id::DefId;
 use serde::{Serialize, ser::SerializeStruct};
-
-#[derive(Debug, Clone)]
-pub struct SymbolDecl {
-    symbol: String,
-    qual_symbol: String,
-}
-
-impl Serialize for SymbolDecl {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut decl = serializer.serialize_struct("type_decl", 4)?;
-        {
-            decl.serialize_field("symbol", &self.symbol)?;
-            decl.serialize_field("qual_symbol", &self.qual_symbol)?;
-        }
-        decl.end()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ModuleDecl {
     path: Option<String>, 
+    generics: Option<Vec<String>>,
     krate: Option<String>,
 }
 
 impl ModuleDecl {
     pub fn none() -> Self {
-        ModuleDecl { path: None, krate: None, }
+        ModuleDecl { path: None, generics: None, krate: None, }
     }
 
     pub fn to_path(&self) -> Option<String> {
         match self {
-            Self { path: Some(path), krate: Some(krate) } => Some(format!("{krate}::{path}")),
-            Self { path: Some(path), krate: None } => Some(format!("{path}")),
+            Self { path: Some(path), krate: Some(krate), generics: Some(generics) } => {
+                Some(format!("{krate}::{path}::<{}>", generics.join(",")))
+            }
+            Self { path: Some(path), krate: Some(krate), generics: None } => {
+                Some(format!("{krate}::{path}"))
+            }
+            Self { path: Some(path), krate: None, .. } => Some(format!("{path}")),
+            Self { path: None, krate: Some(krate), .. } => Some(format!("{krate}")),
             _ => None,
         }
     }
@@ -69,11 +57,8 @@ impl Display for ModuleDecl {
 #[derive(Debug, Clone)]
 pub enum TypeCategory {
     Symbol(String),
-        // qual_symbol: String,
-        // crate_symbol: Option<String>,
-        // type_category: TypeCategory,
-        // deprecation: Option<rustc_attr::Deprecation>,
-    Slice(Box<TypeCategory>),
+    Primitive(String),
+    Slice(Box<TypeDecl>),
     Tuple(Vec<TypeDecl>),
     Ptr(Box<TypeCategory>),
     SelfAlias(Box<TypeCategory>),
@@ -89,6 +74,9 @@ impl TypeCategory {
                     None => path.to_string(),
                 }
             }
+            TypeCategory::Primitive(path) => {
+                path.to_string()
+            }
             TypeCategory::Tuple(xs) => {
                 let items = xs.into_iter().map(|x| {
                     let module = match prefix {
@@ -100,7 +88,7 @@ impl TypeCategory {
                 format!("({})", items)
             }
             TypeCategory::Slice(x) => {
-                let item = x.prefix_with(prefix);
+                let item = x.category.prefix_with(prefix);
                 format!("[{}]", item)
             }
             TypeCategory::Ptr(x) => {
@@ -122,6 +110,7 @@ impl TypeCategory {
             TypeCategory::SelfAlias(x) => {
                 TypeCategory::SelfAlias(Box::new(x.append_generic_params(params)))
             }
+            TypeCategory::Primitive(_) | 
             TypeCategory::Slice(_) |
             TypeCategory::Tuple(_) => self.clone(),
         }
@@ -131,6 +120,24 @@ impl TypeCategory {
 impl Display for TypeCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.prefix_with(None))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum TypeVisibility {
+    Public,
+    Restricted,
+}
+
+use rustc_middle::ty::Visibility;
+
+impl From<Visibility<DefId>> for TypeVisibility 
+{
+    fn from(value: Visibility<DefId>) -> Self {
+        match value {
+            Visibility::Public => TypeVisibility::Public,
+            Visibility::Restricted(_) => TypeVisibility::Restricted,
+        }
     }
 }
 
@@ -147,13 +154,13 @@ impl TypeDecl {
             category: TypeCategory::Symbol(
                 "????***(unknown)***".to_string()
             ),
-            module: ModuleDecl { path: Some("????***(unknown)***".to_string()), krate: Some("????".to_string()) },
+            module: ModuleDecl { path: Some("????***(unknown)***".to_string()), generics: None, krate: Some("????".to_string()) },
             deprecation: None,
         }
     }
 
     pub fn as_slice(self) -> Self {
-        TypeDecl { category: TypeCategory::Slice(Box::new(self.category)), ..self }
+        TypeDecl { category: TypeCategory::Slice(Box::new(self.clone())), ..self }
     }
 
     pub fn as_ptr(self) -> Self {
@@ -174,6 +181,10 @@ impl TypeDecl {
             _ => None
         }
     }
+
+    pub fn make_lookup_key(&self) -> String {
+        self.category.prefix_with(Some(&ModuleDecl { generics: None, ..self.module.clone() }))
+    }
 }
 
 impl Serialize for TypeDecl {
@@ -181,39 +192,48 @@ impl Serialize for TypeDecl {
     where
         S: serde::Serializer,
     {
+        pub struct TypeItemExport<'a> {
+            decl: &'a TypeDecl,
+        }
+        
+        impl <'a> Serialize for TypeItemExport<'a> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                let mut decl = serializer.serialize_struct("type_decl", 4)?;
+                {
+                    decl.serialize_field("lookup_key", &self.decl.make_lookup_key())?;
+                    decl.serialize_field("symbol", &self.decl.category.prefix_with(None))?;
+                    decl.serialize_field("module_symbol", &self.decl.module.path)?;
+                    decl.serialize_field("crate_symbol", &self.decl.module.krate)?;
+                }
+                decl.end()
+            }
+        }
+
         let mut decl = serializer.serialize_struct("type_decl", 5)?;
         {
-            let module = Some(&self.module);
-
             decl.serialize_field("symbol", &self.category.to_string())?;
-            decl.serialize_field("qual_symbol", &self.category.prefix_with(module))?;
+            decl.serialize_field("module_symbol", &self.module.path)?;
             decl.serialize_field("crate_symbol", &self.module.krate)?;
 
             // optional fields ...
             match &self.category {
                 TypeCategory::Symbol(_) |
+                TypeCategory::Primitive(_) |
                 TypeCategory::Ptr(_) => {}
                 TypeCategory::Slice(x) => {
-                    let path = x.prefix_with(None);
-
-                    decl.serialize_field("slice_member", &vec![ SymbolDecl { 
-                        symbol: path.to_string(), 
-                        qual_symbol: TypeCategory::Symbol(path).prefix_with(module), 
-                    } ])?;
+                    decl.serialize_field("slice_member", &vec![ TypeItemExport { decl: x } ])?;
                 }
                 TypeCategory::SelfAlias(_) => {
                     decl.serialize_field("alias", "Self")?;
                 }
                 TypeCategory::Tuple(xs) => {
-                    let members = xs.into_iter().map(|x| {
-                        let path = x.category.prefix_with(None);
-
-                        return SymbolDecl {
-                            symbol: path.to_string(),
-                            qual_symbol: TypeCategory::Symbol(path).prefix_with(Some(&x.module)),
-                        };
-                    })
-                    .collect::<Vec<_>>();
+                    let members = xs.into_iter()
+                        .map(|x| TypeItemExport { decl: x })
+                        .collect::<Vec<_>>()
+                    ;
 
                     decl.serialize_field("tuple_members", &members)?;
                 }
@@ -232,11 +252,21 @@ pub struct FnDecl {
     proto: TypeDecl,
     ret_decl: Option<TypeDecl>,
     args: Vec<TypeDecl>,
+    owner: Option<TypeDecl>,
 }
 
 impl FnDecl {
     pub fn qual_symbol(&self) -> String {
-        let proto = self.proto.category.prefix_with(Some(&self.proto.module));
+        let module = self.owner.as_ref().map(|TypeDecl { category, module, ..  }| {
+            ModuleDecl {
+                path: Some(category.prefix_with(Some(&module))),
+                generics: None,
+                krate: None,
+            }
+        });
+        let proto = self.proto.category.prefix_with(module.as_ref());
+        tracing::trace!("FnDecl.qual_symbol: {module:?}, proto: {proto}, self.module: {:?}", self.owner);
+
         let ret = self.ret_decl.as_ref()
             .map(|ret| format!("-> {}", &ret.category.prefix_with(Some(&ret.module))))
             .unwrap_or("".to_string())
@@ -261,32 +291,75 @@ impl Serialize for FnDecl {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where S: serde::Serializer,
     {
-        struct Prototype<'a> {
-            decl: &'a FnDecl
+        struct FnArg<'a> {
+            index: usize,
+            decl: &'a TypeDecl,
         }
-        impl <'a> Serialize for Prototype<'a> {
+        impl <'a> Serialize for FnArg<'a> {
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
             where S: serde::Serializer 
             {
-                let mut decl = serializer.serialize_struct("type_decl", 5)?;
+                let mut arg_decl = serializer.serialize_struct("fn_decl", 3)?;
                 {
-                    decl.serialize_field("symbol", &self.decl.proto.category.to_string())?;
-                    decl.serialize_field("qual_symbol", &self.decl.qual_symbol())?;
-                    decl.serialize_field("crate_symbol", &self.decl.proto.module.krate)?;
+                    arg_decl.serialize_field("sort_order", &self.index)?;
+                    arg_decl.serialize_field("lookup_key", &self.decl.make_lookup_key())?;
+                    arg_decl.serialize_field("generic_args", &self.decl.module.generics)?;
+                }
+                arg_decl.end()
+            }
+        }
 
-                    if let Some(deprecation) = self.decl.proto.format_deprecated() {
-                        decl.serialize_field("deprecated", &deprecation)?;
-                    }
-                        }
+        struct FnReturn<'a> {
+            decl: &'a TypeDecl,
+        }
+        impl <'a> Serialize for FnReturn<'a> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where S: serde::Serializer 
+            {
+                let mut decl = serializer.serialize_struct("ret_decl", 1)?;
+                {
+                    decl.serialize_field("lookup_key", &self.decl.make_lookup_key())?;
+                    decl.serialize_field("generic_args", &self.decl.module.generics)?;
+                }
                 decl.end()
             }
         }
 
-        let mut decl = serializer.serialize_struct("fn_decl", 4)?;
+        struct FnOwner<'a> {
+            decl: &'a TypeDecl,
+        }
+        impl <'a> Serialize for FnOwner<'a> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where S: serde::Serializer 
+            {
+                let mut decl = serializer.serialize_struct("owner", 2)?;
+                {
+                    decl.serialize_field("lookup_key", &self.decl.make_lookup_key())?;
+                    decl.serialize_field("generic_args", &self.decl.module.generics)?;
+                }
+                decl.end()
+            }
+        }
+        let ret = self.ret_decl.as_ref()
+            .map(|decl| FnReturn { decl: &decl })
+        ;
+        let args = self.args.iter()
+            .enumerate()
+            .map(|(i, decl)| FnArg { index: i+1, decl: decl })
+            .collect::<Vec<_>>()
+        ;
+
+        let mut decl = serializer.serialize_struct("fn_decl", 7)?;
         {
-            decl.serialize_field("proto", &Prototype { decl: self })?;
-            decl.serialize_field("ret_decl", &self.ret_decl)?;
-            decl.serialize_field("args", &self.args)?;
+            decl.serialize_field("proto", &self.proto.category.to_string())?; 
+            decl.serialize_field("proto_qual", &self.qual_symbol())?; // TODO: future removing...
+            decl.serialize_field("ret_decl", &ret)?;
+            decl.serialize_field("args", &args)?;
+            decl.serialize_field("owner", &self.owner.as_ref().map(|owner| FnOwner { decl: &owner }))?;
+
+            if let Some(deprecation) = self.proto.format_deprecated() {
+                decl.serialize_field("deprecated", &deprecation)?;
+            }
         }
         decl.end()
     }
