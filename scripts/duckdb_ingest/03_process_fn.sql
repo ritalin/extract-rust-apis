@@ -3,6 +3,7 @@ create or replace temporary table tmp_fn_decl_members_ph1 (
     kind type_kind not null,
     member_order int not null,
     member_category type_category not null,
+    member_is_compound bool not null,
     member_item_order int not null,
     member_item_type_id bigint not null,
     member_item_lookup_key varchar not null,
@@ -23,7 +24,7 @@ select
 from tmp_fn_decl t1;
 
 insert into tmp_fn_decl_members_ph1 (
-    id, kind, member_order, member_category, 
+    id, kind, member_order, member_category, member_is_compound,
     member_item_order, member_item_type_id, 
     member_item_lookup_key, member_item_symbol, member_item_module, member_item_crate,
     member_item_generic_args
@@ -31,6 +32,7 @@ insert into tmp_fn_decl_members_ph1 (
 select 
     t1.id, t2.kind, t2.member_order, 
     t3.member_category,
+    t3.member_is_compound,
     t3.member_item_order,
     t4.id,
     t3.member_item_lookup_key,
@@ -89,19 +91,19 @@ join lateral (
         ts1.decl.module_symbol as member_item_module,
         ts1.decl.crate_symbol as member_item_crate,
         t2.generic_args as member_item_generic_args,
+        (ts1.decl.slice_member is not null) or (coalesce(ts1.decl.tuple_members, []) <> []) as member_is_compound,
     from tmp_type_decl_ph1 ts1
     where 
         ts1.lookup_key = t2.lookup_key
         and ts1.decl.alias is null
-        and ts1.decl.slice_member is null
-        and coalesce(ts1.decl.tuple_members, []) = []
     /* slice */
     union all
     select
         'slice'::type_category, 
         1, 
         ts1.member.lookup_key,
-        ts1.member.symbol, ts1.member.module_symbol, ts1.member.crate_symbol, []
+        ts1.member.symbol, ts1.member.module_symbol, ts1.member.crate_symbol, [],
+        false,
     from (
         select unnest(ts1.decl.slice_member) as member
         from tmp_type_decl_ph1 ts1
@@ -115,7 +117,8 @@ join lateral (
         'tuple'::type_category, 
         ts1.member.index, 
         ts1.member.item.lookup_key,
-        ts1.member.item.symbol, ts1.member.item.module_symbol, ts1.member.item.crate_symbol, []
+        ts1.member.item.symbol, ts1.member.item.module_symbol, ts1.member.item.crate_symbol, [],
+        false,
     from (
         select ts1.tuple_members.apply((x, i) -> {'item': x, 'index': i}).unnest() as member
         from (
@@ -154,13 +157,14 @@ where exists (
 );
 
 insert into tmp_fn_decl_members_ph1 (
-    id, kind, member_order, member_category, 
+    id, kind, member_order, member_category, member_is_compound,
     member_item_order, member_item_type_id,
     member_item_lookup_key, member_item_symbol, member_item_module, member_item_crate, member_item_generic_args
 )
 select
     t1.id, t3.kind, t3.member_order, 
     t3.member_category,
+    t3.member_is_compound,
     t3.member_item_order,
     coalesce(t4.member_item_type_id, t3.member_item_type_id),
     coalesce(t4.member_item_lookup_key, t3.member_item_lookup_key),
@@ -210,6 +214,7 @@ with member_fmt as not materialized (
             t1.member_item_symbol
         ) as member_item_qual_symbol,
     from tmp_fn_decl_members_ph1 t1
+    where t1.member_is_compound is false
 )
 select v.* 
 from (

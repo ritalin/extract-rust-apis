@@ -60,7 +60,7 @@ from tmp_fn_decl_members_ph1 t1
 where t1.kind in ('arg', 'return');
 
 insert into prototype_crate_ref (prototype_id, crate_id)
-select t1.id, t2.id
+select distinct t1.id, t2.id
 from tmp_fn_decl_members_ph1 t1
 join crate_symbol t2 on t1.member_item_crate = t2.symbol
 where t1.kind = 'owner';
