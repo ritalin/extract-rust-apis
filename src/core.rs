@@ -209,22 +209,6 @@ fn walk_function_item(ctx: &ProcessContext, owner_id: OwnerId, decl: &rustc_hir:
     ;
 
     debug!("(fn.deprecated) {:?}", deprecation);
-    
-    // let fn_module = match owner {
-    //     Some(TypeDecl { category: cat, module: ModuleDecl { path: Some(path), krate }, .. }) => {
-    //         ModuleDecl {
-    //             path: Some(format!("{}::{}", path, cat.to_string())),
-    //             krate: krate.clone(),
-    //         }
-    //     }
-    //     Some(TypeDecl { category: cat, module: ModuleDecl { path: None, krate }, .. }) => {
-    //         ModuleDecl {
-    //             path: Some(cat.to_string()),
-    //             krate: krate.clone(),
-    //         }
-    //     }
-    //     None => ModuleDecl::none(),
-    // };
 
     let fn_decl = FnDecl {
         proto: TypeDecl {
@@ -295,8 +279,10 @@ fn walk_type_item(ctx: &ProcessContext, type_item: &Ty) -> WalkResult<TypeDecl> 
 
             match walk_function_item(ctx, type_item.hir_id.owner, fn_decl, "", &None) {
                 Some(fn_decl) => {
+                    debug!("[BareFn] resolved: {:?}", fn_decl);
                     Ok(TypeDecl {
-                        category: TypeCategory::Symbol(fn_decl.to_string()),
+                        category: TypeCategory::Symbol("{BareFn}".to_string()),
+                        // category: TypeCategory::Symbol(fn_decl.to_string()),
                         module: ModuleDecl::none(),
                         deprecation: fn_decl.proto.deprecation,
                     })
@@ -380,14 +366,22 @@ fn symbol_from_segments(segments: &[rustc_hir::PathSegment]) -> String {
 
 fn mod_from_segments(segments: &[rustc_hir::PathSegment]) -> Option<String> {
     match segments.len() {
-        0 | 1 => None,
+        0 | 1 | 2 => None,
         _ => Some(
             segments.iter()
-                .take(segments.len()-1)
+                .skip(1)
+                .take(segments.len()-2)
                 .map(|seg| seg.ident.name.as_str().to_string())
                 .collect::<Vec<_>>()
                 .join("::")
         )
+    }
+}
+
+fn crate_from_segments(segments: &[rustc_hir::PathSegment]) -> Option<String> {
+    match segments.len() {
+        0 | 1 => None,
+        _ => Some(segments[0].ident.name.as_str().to_string())
     }
 }
 
@@ -491,7 +485,7 @@ fn resolve_qualified_type_opt(ctx: &ProcessContext, res: &rustc_hir::def::Res, s
             }
             
             Some(TypeDecl {
-                category: TypeCategory::Symbol(symbol_from_segments(segments),),
+                category: TypeCategory::Symbol(symbol_from_segments(segments)),
                 module: ModuleDecl::none(),
                 deprecation: None,
             })
@@ -500,7 +494,6 @@ fn resolve_qualified_type_opt(ctx: &ProcessContext, res: &rustc_hir::def::Res, s
             debug!("prim crate: {} {:?}", ty.name_str().to_string(), Some(ctx.crate_name_of(LOCAL_CRATE)));
             Some(TypeDecl {
                 category: TypeCategory::Primitive(ty.name_str().to_string()),
-                // module: ModuleDecl { path: None, generics: None, krate: Some(ctx.crate_name_of(LOCAL_CRATE)) },
                 module: ModuleDecl::none(),
                 deprecation: None,
             })
@@ -508,7 +501,7 @@ fn resolve_qualified_type_opt(ctx: &ProcessContext, res: &rustc_hir::def::Res, s
         rustc_hir::def::Res::Err if segments.len() > 0 => {
             Some(TypeDecl {
                 category: TypeCategory::Symbol(symbol_from_segments(segments)),
-                module: ModuleDecl { path: mod_from_segments(segments), generics: None, krate: None },
+                module: ModuleDecl { path: mod_from_segments(segments), generics: None, krate: crate_from_segments(segments) },
                 deprecation: None,
             })
         }
@@ -535,7 +528,8 @@ fn pick_bound_generic_params(ctx: &ProcessContext, generics: Option<&rustc_hir::
                     GenericArg::Type(ty) => walk_type_item(ctx, ty).ok(),
                     _ => None,
                 })
-                .map(|x| x.category.prefix_with(Some(&x.module)))
+                .map(|x| x.category.prefix_with(None)) // remap issue
+                // .map(|x| x.category.prefix_with(Some(&x.module)))
                 .collect::<Vec<_>>()
                 .join(",")
             ;
@@ -712,7 +706,8 @@ pub mod import_handler {
                 let configs = children.into_iter()
                     .filter_map(|c| {
                         debug!("use.mod.child: {c:?}");
-                        // if c.vis != Visibility::Public { return None; }
+                        if c.vis != Visibility::Public { return None; }
+
                         if let Res::Def(_, _) = c.res {
                             if let Some(mod_def_id) = c.res.mod_def_id() {
                                 if mod_def_id != *def_id { return None; }
@@ -763,7 +758,7 @@ pub mod import_handler {
                         debug!("use.decl.to: {}, decl: {lhs_type:?}", lhs_type.category.prefix_with(Some(&lhs_type.module)));
                         info!("use.decl.accepted from: {:?}, to: {:?}", rhs_type, lhs_type);
 
-                        return Some(vec![ImportConfig::new(rhs_type, lhs_type)]);
+                        return Some(vec![ImportConfig::new(&ctx.root_crate(), rhs_type, lhs_type)]);
                     }
                 }
                 DefKind::Mod => {
