@@ -19,13 +19,14 @@ use crate::ModuleDecl;
 use crate::TypeDecl;
 
 pub struct ImportConfig { 
+    pub crate_symbol: String,
     pub from_type: TypeDecl, 
     pub to_type: TypeDecl, 
 }
 
 impl ImportConfig {
-    pub fn new(from_type: TypeDecl, to_type: TypeDecl) -> Self {
-        ImportConfig { from_type: from_type.clone(), to_type: to_type.clone() }
+    pub fn new(crate_symbol: &str, from_type: TypeDecl, to_type: TypeDecl) -> Self {
+        ImportConfig { crate_symbol: crate_symbol.to_string(), from_type: from_type.clone(), to_type: to_type.clone() }
     }
 }
 
@@ -114,6 +115,10 @@ impl ProcessContext<'_> {
             0 => self.root_crate_symbol.to_string(),
             _ => self.raw_context.crate_name(krate).to_string(),
         }
+    }
+
+    pub fn root_crate(&self) -> String {
+        self.root_crate_symbol.clone()
     }
 
     pub fn parent_hir_id(&self, hir_id: HirId) -> HirId {

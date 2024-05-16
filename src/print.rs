@@ -94,6 +94,7 @@ fn handle_print_types(functions: &[FnDecl], import_to: &[&crate::support::Import
 fn handle_print_imports(import_to: &[&crate::support::ImportConfig], file_path: PathBuf, pp: bool) {
     #[derive(Serialize)]
     struct ImportMap {
+        crate_symbol: String,
         from_type: String,
         to_type: String,
     }
@@ -101,6 +102,7 @@ fn handle_print_imports(import_to: &[&crate::support::ImportConfig], file_path: 
     let maps = import_to.into_iter()
         .map(|config| {
             ImportMap {
+                crate_symbol: config.crate_symbol.clone(),
                 from_type: config.from_type.make_lookup_key(),
                 to_type: config.to_type.make_lookup_key(),
             }
