@@ -265,10 +265,9 @@ impl FnDecl {
             }
         });
         let proto = self.proto.category.prefix_with(module.as_ref());
-        tracing::trace!("FnDecl.qual_symbol: {module:?}, proto: {proto}, self.module: {:?}", self.owner);
 
         let ret = self.ret_decl.as_ref()
-            .map(|ret| format!("-> {}", &ret.category.prefix_with(Some(&ret.module))))
+            .map(|ret| format!(" -> {}", &ret.category.prefix_with(Some(&ret.module))))
             .unwrap_or("".to_string())
         ;
         let args = self.args.iter()
@@ -277,7 +276,7 @@ impl FnDecl {
             .join(", ")
         ;
 
-        format!("{}({}) {}", proto, args, ret)
+        format!("{}({}){}", proto, args, ret)
     }
 }
 
@@ -352,7 +351,7 @@ impl Serialize for FnDecl {
         let mut decl = serializer.serialize_struct("fn_decl", 7)?;
         {
             decl.serialize_field("proto", &self.proto.category.to_string())?; 
-            decl.serialize_field("proto_qual", &self.qual_symbol())?; // TODO: future removing...
+            decl.serialize_field("proto_qual", &self.qual_symbol())?;
             decl.serialize_field("ret_decl", &ret)?;
             decl.serialize_field("args", &args)?;
             decl.serialize_field("owner", &self.owner.as_ref().map(|owner| FnOwner { decl: &owner }))?;
